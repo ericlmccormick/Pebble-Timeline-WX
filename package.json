@@ -43,16 +43,7 @@
             "TEMP_UNIT",
             "LOCATION_MODE",
             "LOCATION_QUERY",
-            "REFRESH_INTERVAL",
-            "ERROR_MSG",
-            "DARK_MODE",
-            "CHUNK_INDEX",
-            "CHUNK_DATA",
-            "REQUEST_CHUNK",
-            "SETTINGS_SYNC",
-            "REFRESH_REQUESTED",
-            "LOCATION_METHOD",
-            "ZIP_CODE"
+            "REFRESH_INTERVAL"
         ],
         "projectType": "native",
         "resources": {
