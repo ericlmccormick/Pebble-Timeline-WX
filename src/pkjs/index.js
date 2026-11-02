@@ -66,38 +66,34 @@ function sendThemeSetting() {
   Pebble.sendAppMessage(msg, null, function(e) { console.log('Theme update failed: ' + JSON.stringify(e)); });
 }
 function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
-  var c1 = {}, c2 = {};
-  var settings = currentSettings(), units = setting(settings, keys.TEMP_UNIT, 'TEMP_UNIT', 'F');
-  var wind = windPreference(settings, units);
-  c1[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
-  if (hours.sunrise && hours.sunset) { c1[keys.SUNRISE] = hours.sunrise; c1[keys.SUNSET] = hours.sunset; }
-  c1[keys.UNITS] = units === 'C' ? 'metric' : 'imperial';
-  c1[keys.WIND_UNIT] = wind;
-  c1[keys.FORECAST_TIMESTAMP] = Math.floor(savedAt / 1000);
-  c1[keys.FORECAST_CACHED] = cached ? 1 : 0;
-  c1[keys.LOCATION_NAME] = location || 'Current location';
-  c1[keys.GUSTS_ENABLED] = gustsEnabled ? 1 : 0;
-  c1[keys.FORECAST_COUNT] = Math.min(hours.length, 24);
-  var count = Math.min(hours.length, 24);
-  for (var i = 0; i < count; i++) {
-    var h = hours[i], target = i < 12 ? c1 : c2;
-    target[keys.COLUMN_TIME+i] = h.time;
-    target[keys.COLUMN_TEMP+i] = h.temp;
-    target[keys.COLUMN_WIND+i] = h.wind;
-    target[keys.COLUMN_RAIN+i] = h.rain;
-    target[keys.COLUMN_UV+i] = h.uv;
-    target[keys.COLUMN_COND+i] = h.cond;
-    target[keys.IS_NIGHT+i] = h.night;
-    target[keys.COLUMN_GUST+i] = h.gust;
+  var settings=currentSettings(), units=setting(settings,keys.TEMP_UNIT,'TEMP_UNIT','F');
+  var wind=windPreference(settings,units), count=Math.min(hours.length,48);
+  var chunks=[{},{},{},{}];
+  var first=chunks[0];
+  first[keys.COLOR_MODE]=setting(settings,keys.COLOR_MODE,'COLOR_MODE','auto');
+  if(hours.sunrise&&hours.sunset){first[keys.SUNRISE]=hours.sunrise;first[keys.SUNSET]=hours.sunset;}
+  first[keys.UNITS]=units==='C'?'metric':'imperial';
+  first[keys.WIND_UNIT]=wind;
+  first[keys.FORECAST_TIMESTAMP]=Math.floor(savedAt/1000);
+  first[keys.FORECAST_CACHED]=cached?1:0;
+  first[keys.LOCATION_NAME]=location||'Current location';
+  first[keys.GUSTS_ENABLED]=gustsEnabled?1:0;
+  first[keys.FORECAST_COUNT]=count;
+  for(var i=0;i<count;i++){
+    var h=hours[i],t=chunks[Math.floor(i/12)];
+    t[keys.COLUMN_TIME+i]=h.time;
+    t[keys.COLUMN_TEMP+i]=h.temp;
+    t[keys.COLUMN_WIND+i]=h.wind;
+    t[keys.COLUMN_RAIN+i]=h.rain;
+    t[keys.COLUMN_UV+i]=h.uv;
+    t[keys.COLUMN_COND+i]=h.cond;
+    t[keys.IS_NIGHT+i]=h.night;
+    t[keys.COLUMN_GUST+i]=h.gust;
   }
-  // A complete forecast is published only after both parts arrive.
-  c1[keys.TRANSFER_PART] = 1;
-  c2[keys.TRANSFER_PART] = 2;
-  c2[keys.TRANSFER_COUNT] = count;
-  sendWeatherChunks(c1, c2);
+  for(var j=0;j<4;j++)chunks[j][keys.TRANSFER_PART]=j+1;
+  chunks[3][keys.TRANSFER_COUNT]=count;
+  sendWeatherChunks(chunks);
 }
-// All provider adapters normalize to Celsius, m/s, probability [0,1], and UTC seconds.
-// The watch protocol stays the existing atomic 24-hour two-part transfer.
 function wmoCode(c) {
   if(c===0)return 800;if(c===1)return 801;if(c===2)return 802;
   if(c===3)return 803;if(c>=45&&c<=48)return 701;
@@ -214,7 +210,7 @@ function fetchWeather() {
       providerData(name,lat,lon,apiKey,function(err,data) {
         if(err){console.log(name+': '+err);if(provider==='auto')attempt(i+1);else fail(name+' failed: '+err.message);return;}
         var now=Math.floor(Date.now()/1000);
-        var rows=data.rows.filter(function(h){return h.dt>=now-3600&&h.dt<now+49*3600;}).slice(0,24);
+        var rows=data.rows.filter(function(h){return h.dt>=now-3600&&h.dt<now+49*3600;}).slice(0,48);
         if(rows.length<6){if(provider==='auto')attempt(i+1);else fail('Incomplete '+name+' forecast');return;}
         var formatted=rows.map(function(h){
           var hr=new Date(h.dt*1000).getHours();
@@ -281,30 +277,24 @@ function completeForecast(hours, location, timeFormat, units, windUnit, gustsEna
 }
 // Serialize whole forecast transactions. Interleaved cached/live transfers
 // otherwise overwrite the watch's pending first chunk.
-function sendWeatherChunks(c1, c2) {
-  transferQueue.push({first:c1, second:c2});
+function sendWeatherChunks(chunks) {
+  transferQueue.push(chunks);
   if (transferQueue.length > 3) transferQueue.splice(0, transferQueue.length - 2);
   drainTransfers();
 }
 function drainTransfers() {
-  if (transferBusy || !transferQueue.length) return;
-  transferBusy = true;
-  var tx = transferQueue.shift();
-  function finish() {
-    transferBusy = false;
-    drainTransfers();
+  if(transferBusy||!transferQueue.length)return;
+  transferBusy=true;
+  var chunks=transferQueue.shift();
+  function finish(){transferBusy=false;drainTransfers();}
+  function sendPart(i){
+    if(i===chunks.length){console.log('48-hour forecast delivered');finish();return;}
+    Pebble.sendAppMessage(chunks[i],function(){sendPart(i+1);},function(e){
+      console.log('Forecast part '+(i+1)+' failed: '+JSON.stringify(e));
+      showStatus('Watch transfer failed');finish();
+    });
   }
-  function fail(phase, err) {
-    console.log(phase + ' chunk failed: ' + JSON.stringify(err));
-    showStatus('Watch transfer failed');
-    finish();
-  }
-  Pebble.sendAppMessage(tx.first, function() {
-    Pebble.sendAppMessage(tx.second, function() {
-      console.log('Forecast delivered');
-      finish();
-    }, function(e) { fail('Second', e); });
-  }, function(e) { fail('First', e); });
+  sendPart(0);
 }
 
 // ==============================================================================
