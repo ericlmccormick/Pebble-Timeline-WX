@@ -24,6 +24,22 @@ module.exports = [
           { "label": "Knots (kt)", "value": "knots" }
         ]
       },
+      {
+        "type": "radiogroup", "messageKey": "COLOR_MODE", "label": "Appearance", "defaultValue": "auto",
+        "options": [
+          {"label":"Auto (watch time)","value":"auto"},
+          {"label":"Day (light)","value":"day"},
+          {"label":"Night (dark)","value":"night"}
+        ]
+      },
+      {
+        "type": "radiogroup", "messageKey": "LOCATION_MODE", "label": "Weather Location", "defaultValue": "gps",
+        "options": [
+          {"label":"Phone GPS","value":"gps"},
+          {"label":"ZIP Code or City","value":"manual"}
+        ]
+      },
+      { "type": "input", "messageKey": "LOCATION_QUERY", "label": "ZIP code or City (for manual location)", "defaultValue": "" },
       { "type": "toggle", "messageKey": "SHOW_GUSTS", "label": "Show wind gusts on center button", "defaultValue": false },
       {
         "type": "radiogroup",
