@@ -15,6 +15,9 @@ var retryCount = 0;
 var REFRESH_MS = 30 * 60 * 1000;
 var MAX_RETRIES = 3;
 var requestInProgress = false;
+var transferQueue = [];
+var transferBusy = false;
+var refreshQueued = false;
 
 function scheduleRetry() {
   requestInProgress = false;
@@ -56,6 +59,12 @@ function sendCachedWeather() {
     return true;
   } catch(e) { console.log('Cache invalid: ' + e); return false; }
 }
+function sendThemeSetting() {
+  var settings = currentSettings();
+  var msg = {};
+  msg[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
+  Pebble.sendAppMessage(msg, null, function(e) { console.log('Theme update failed: ' + JSON.stringify(e)); });
+}
 function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var c1 = {}, c2 = {};
   var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
@@ -88,7 +97,7 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   sendWeatherChunks(c1, c2);
 }
 function fetchWeather() {
-  if (requestInProgress) return;
+  if (requestInProgress) { refreshQueued = true; showStatus('Refresh queued'); return; }
   requestInProgress = true;
   // 1. Retrieve user preferences from local phone storage
   var settings = {};
@@ -248,6 +257,7 @@ function fetchWeather() {
 function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled, sunrise, sunset) {
   requestInProgress = false;
   retryCount = 0;
+  if (refreshQueued) { refreshQueued = false; setTimeout(fetchWeather, 100); }
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   var savedAt = Date.now();
   hours.sunrise = sunrise;
@@ -255,17 +265,32 @@ function completeForecast(hours, location, timeFormat, units, windUnit, gustsEna
   localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:setting(currentSettings(), keys.LOCATION_MODE, 'LOCATION_MODE', 'gps'), locationQuery:String(setting(currentSettings(), keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim(), savedAt:savedAt}));
   transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
-function sendWeatherChunks(c1, c2, attempt) {
-  attempt = attempt || 0;
-  Pebble.sendAppMessage(c1, function() {
-    Pebble.sendAppMessage(c2, function() { console.log('Forecast delivered'); }, function(e) {
-      console.log('Second chunk failed: ' + JSON.stringify(e));
-      if (attempt < 2) setTimeout(function() { sendWeatherChunks(c1, c2, attempt + 1); }, 1500 * (attempt + 1)); else showStatus('Watch transfer failed');
-    });
-  }, function(e) {
-    console.log('First chunk failed: ' + JSON.stringify(e));
-    if (attempt < 2) setTimeout(function() { sendWeatherChunks(c1, c2, attempt + 1); }, 1500 * (attempt + 1));
-  });
+// Serialize whole forecast transactions. Interleaved cached/live transfers
+// otherwise overwrite the watch's pending first chunk.
+function sendWeatherChunks(c1, c2) {
+  transferQueue.push({first:c1, second:c2});
+  if (transferQueue.length > 3) transferQueue.splice(0, transferQueue.length - 2);
+  drainTransfers();
+}
+function drainTransfers() {
+  if (transferBusy || !transferQueue.length) return;
+  transferBusy = true;
+  var tx = transferQueue.shift();
+  function finish() {
+    transferBusy = false;
+    drainTransfers();
+  }
+  function fail(phase, err) {
+    console.log(phase + ' chunk failed: ' + JSON.stringify(err));
+    showStatus('Watch transfer failed');
+    finish();
+  }
+  Pebble.sendAppMessage(tx.first, function() {
+    Pebble.sendAppMessage(tx.second, function() {
+      console.log('Forecast delivered');
+      finish();
+    }, function(e) { fail('Second', e); });
+  }, function(e) { fail('First', e); });
 }
 
 // ==============================================================================
@@ -274,6 +299,7 @@ function sendWeatherChunks(c1, c2, attempt) {
 
 // Triggers immediately when the watch app boots up
 Pebble.addEventListener('ready', function() {
+  sendThemeSetting();
   sendCachedWeather();
   fetchWeather();
   refreshTimer = setInterval(fetchWeather, REFRESH_MS);
@@ -284,5 +310,5 @@ Pebble.addEventListener('appmessage', function(e) {
 
 // Triggers when the user closes the Clay Settings menu on their phone
 Pebble.addEventListener('webviewclosed', function(e) {
-  if (e && e.response) { retryCount = 0; sendCachedWeather(); fetchWeather(); } // Refresh data with new user settings
+  if (e && e.response) { retryCount = 0; sendThemeSetting(); fetchWeather(); } // Refresh data with new user settings
 });
