@@ -279,7 +279,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   const int row_height = grid_height / visible_rows;
 
   // 5. Draw the Data Grid
-  for(int i = 0; i < visible_rows; i++) {
+  for(int i = 0; i < (s_has_forecast ? visible_rows : 0); i++) {
     int idx = i + s_scroll_offset;    // The actual data array index based on scroll position
     int y = 24 + (i * grid_height) / visible_rows; // Distribute rows evenly to the bottom
     
@@ -355,7 +355,8 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, 24, 2, bounds.size.h - 24 - bottom_margin), 0, GCornerNone);
   
   // Calculate relative handle position based on offset
-  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 42);
+  int max_scroll = s_forecast_count > 6 ? s_forecast_count - 6 : 1;
+  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / max_scroll);
   graphics_context_set_fill_color(ctx, dark ? GColorWhite : GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
@@ -495,9 +496,9 @@ static void init() {
   window_set_window_handlers(s_main_window, (WindowHandlers) { .load = main_window_load });
   window_stack_push(s_main_window, true);
   
-  // Register Bluetooth callbacks and open a large 8kb buffer for 24h payloads
+  // Each message carries 12 hours; keep buffers small to preserve heap.
   app_message_register_inbox_received(inbox_received_callback);
-  app_message_open(4096, 512);
+  app_message_open(2048, 256);
   tick_timer_service_subscribe(MINUTE_UNIT, auto_theme_tick); 
 }
 
