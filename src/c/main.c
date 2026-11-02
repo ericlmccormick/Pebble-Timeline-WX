@@ -51,8 +51,6 @@ static bool s_has_forecast = false; // True after receiving forecast data
 
 // Temporary Notification Banner State
 static char s_location_name[32] = "Retrieving weather..."; // Kept for persistence metadata
-static bool s_show_banner = false; // Legacy layout flag; notifications now overlay six rows
-static AppTimer *s_banner_timer = NULL;
 
 // ==============================================================================
 // MEMORY MANAGEMENT & ASSET LOADING
@@ -72,7 +70,7 @@ static void invalidate_icon(int idx) {
 static void update_icons_for_view() {
   for(int i = 0; i < 48; i++) {
     // Check if the index falls within the currently visible 6-hour window
-    if (i >= s_scroll_offset && i < s_scroll_offset + (s_show_banner ? 5 : 6)) {
+    if (i >= s_scroll_offset && i < s_scroll_offset + 6) {
       
       // If the icon isn't loaded yet, and we have valid condition data
       if (!s_icon_bitmaps[i] && s_conditions[i] != 0) {
@@ -787,7 +785,6 @@ static void init() {
 // App teardown
 static void deinit() {
   tick_timer_service_unsubscribe();
-  if (s_banner_timer) app_timer_cancel(s_banner_timer); // Clear lingering timers
   if (s_status_timer) app_timer_cancel(s_status_timer);
   if (s_slide_timer) app_timer_cancel(s_slide_timer);
   for(int i = 0; i < 48; i++) { 
