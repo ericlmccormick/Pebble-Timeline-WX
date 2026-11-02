@@ -15,8 +15,7 @@ static int s_is_night[48];              // Boolean flag (1 or 0) for day/night i
 static int s_conditions[48];            // OpenWeather condition ID codes (e.g., 500 = light rain)
 static GBitmap *s_icon_bitmaps[48];     // Shared pointers for icons on visible rows
 static uint32_t s_icon_resource_ids[48]; // Resource identity for safe bitmap sharing
-static char s_pending_data[48][4][10];
-static int s_pending_uv[48], s_pending_night[48], s_pending_conditions[48], s_pending_gust[48];
+// Pending forecasts remain packed until all parts have been verified.
 static int s_gust[48], s_forecast_count = 0, s_pending_count = 0;
 static int s_pending_wind_unit = 0;
 static bool s_pending_metric = false, s_pending_gust_enabled = false, s_gust_enabled = false;
@@ -435,19 +434,19 @@ static void decode_forecast_bytes(const uint8_t *data, int count, int offset) {
   for (int r = 0; r < count && offset+r < 48; r++) {
     int i = offset + r;
     const uint8_t *b = data + r * 20;
-    memcpy(s_pending_data[i][0], b, 4);
-    s_pending_data[i][0][4] = '\0';
-    memcpy(s_pending_data[i][1], b + 4, 7);
-    s_pending_data[i][1][7] = '\0';
+    memcpy(s_forecast_data[i][0], b, 4);
+    s_forecast_data[i][0][4] = '\0';
+    memcpy(s_forecast_data[i][1], b + 4, 7);
+    s_forecast_data[i][1][7] = '\0';
     unsigned int wind = b[11] | ((unsigned int)b[12] << 8);
     unsigned int gust = b[13] | ((unsigned int)b[14] << 8);
-    snprintf(s_pending_data[i][2], 10, "%u", wind);
-    if (b[15] == 255) snprintf(s_pending_data[i][3], 10, "--");
-    else snprintf(s_pending_data[i][3], 10, "%u%%", b[15]);
-    s_pending_uv[i] = b[16] == 255 ? -1 : (int)b[16];
-    s_pending_conditions[i] = b[17] | ((int)b[18] << 8);
-    s_pending_night[i] = b[19] ? 1 : 0;
-    s_pending_gust[i] = (int)gust;
+    snprintf(s_forecast_data[i][2], 10, "%u", wind);
+    if (b[15] == 255) snprintf(s_forecast_data[i][3], 10, "--");
+    else snprintf(s_forecast_data[i][3], 10, "%u%%", b[15]);
+    s_uv_values[i] = b[16] == 255 ? -1 : (int)b[16];
+    s_conditions[i] = b[17] | ((int)b[18] << 8);
+    s_is_night[i] = b[19] ? 1 : 0;
+    s_gust[i] = (int)gust;
   }
 }
 
@@ -504,13 +503,6 @@ static void restore_persisted_forecast(void) {
   }
   for (int p = 0; p < parts; p++)
     decode_forecast_bytes(s_pending_packed[p], s_pending_packed_len[p]/20, p*6);
-  for (int i = 0; i < meta.count; i++) {
-    memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
-    s_uv_values[i] = s_pending_uv[i];
-    s_is_night[i] = s_pending_night[i];
-    s_conditions[i] = s_pending_conditions[i];
-    s_gust[i] = s_pending_gust[i];
-  }
   s_forecast_count = meta.count;
   s_forecast_timestamp = (time_t)meta.timestamp;
   s_sunrise = (time_t)meta.sunrise;
@@ -591,11 +583,6 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   if (number == 1) {
     s_pending_transfer_id = transfer_id;
     s_last_acked_part = 0;
-    memset(s_pending_data, 0, sizeof(s_pending_data));
-    memset(s_pending_uv, 0, sizeof(s_pending_uv));
-    memset(s_pending_night, 0, sizeof(s_pending_night));
-    memset(s_pending_conditions, 0, sizeof(s_pending_conditions));
-    memset(s_pending_gust, 0, sizeof(s_pending_gust));
     s_pending_first = true;
     s_pending_next_part = 2;
     s_pending_count = 0;
@@ -631,52 +618,42 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     else if (key == MESSAGE_KEY_FORECAST_CACHED) s_pending_cached = t->value->int32 != 0;
     else if (key == MESSAGE_KEY_GUSTS_ENABLED) s_pending_gust_enabled = t->value->int32 != 0;
     else if (key == MESSAGE_KEY_TRANSFER_COUNT || key == MESSAGE_KEY_FORECAST_COUNT) s_pending_count = (int)t->value->int32;
-    else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 48) s_pending_night[key-MESSAGE_KEY_IS_NIGHT] = t->value->int32;
-    else if (key >= MESSAGE_KEY_COLUMN_COND && key < MESSAGE_KEY_COLUMN_COND + 48) s_pending_conditions[key-MESSAGE_KEY_COLUMN_COND] = t->value->int32;
-    else if (key >= MESSAGE_KEY_COLUMN_TIME && key < MESSAGE_KEY_COLUMN_TIME + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TIME][0], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_TEMP && key < MESSAGE_KEY_COLUMN_TEMP + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TEMP][1], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_WIND && key < MESSAGE_KEY_COLUMN_WIND + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_WIND][2], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_RAIN && key < MESSAGE_KEY_COLUMN_RAIN + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_RAIN][3], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_UV && key < MESSAGE_KEY_COLUMN_UV + 48) s_pending_uv[key-MESSAGE_KEY_COLUMN_UV] = t->value->int32;
-    else if (key >= MESSAGE_KEY_COLUMN_GUST && key < MESSAGE_KEY_COLUMN_GUST + 48) s_pending_gust[key-MESSAGE_KEY_COLUMN_GUST] = atoi(t->value->cstring);
     t = dict_read_next(iterator);
   }
   Tuple *blob = dict_find(iterator, MESSAGE_KEY_FORECAST_BLOB);
-  if (blob) {
-    int count = blob->length / 20;
-    if (blob->type != TUPLE_BYTE_ARRAY || blob->length == 0 ||
-        blob->length % 20 != 0 || count > 6) {
-      APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid compact chunk length %d", blob->length);
-      return;
-    }
-    decode_forecast_bytes(blob->value->data, count, (number-1)*6);
-  }
   int total = s_pending_count;
-  if (total < 1 || total > 48) { APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast count %d in part %d", total, number); return; }
+  if (total < 1 || total > 48) { APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid count %d", total); return; }
   int start = (number - 1) * 6;
   int end = start + 6 < total ? start + 6 : total;
-  if (blob && blob->length != (end - start) * 20) { APP_LOG(APP_LOG_LEVEL_WARNING, "Incomplete compact part %d", number); return; }
-  if (start >= total) { APP_LOG(APP_LOG_LEVEL_WARNING, "Part %d outside count %d", number, total); return; }
-  for (int i = start; i < end; i++) {
-    if (!s_pending_data[i][0][0] || !s_pending_data[i][1][0] ||
-        !s_pending_data[i][2][0] || !s_pending_data[i][3][0]) { APP_LOG(APP_LOG_LEVEL_WARNING, "Missing data in part %d hour %d", number, i); return; }
+  if (start >= total || !blob || blob->type != TUPLE_BYTE_ARRAY ||
+      blob->length != (end-start)*20) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid packed forecast part %d", number);
+    return;
   }
-  if (blob) {
-    memcpy(s_pending_packed[number-1], blob->value->data, blob->length);
-    s_pending_packed_len[number-1] = blob->length;
+  const uint8_t *bytes = blob->value->data;
+  for (int i = 0; i < end-start; i++) {
+    const uint8_t *b = bytes + 20*i;
+    if (!b[0] || !b[4] || (b[15] > 100 && b[15] != 255) || b[19] > 1) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast row %d", start+i);
+      return;
+    }
   }
+  memcpy(s_pending_packed[number-1], bytes, blob->length);
+  s_pending_packed_len[number-1] = blob->length;
   // Keep the last complete forecast visible until ALL chunks arrive.
   // Never expose a partial refresh to the scrolling UI.
   s_pending_next_part = number + 1;
   if (end == total) {
+    // Every chunk has already been checked: decode the complete snapshot at once.
+    // The previous displayed forecast stays untouched until this point.
     for (int i = 0; i < total; i++) {
-      if (s_conditions[i] != s_pending_conditions[i] || s_is_night[i] != s_pending_night[i]) invalidate_icon(i);
-      memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
-      s_uv_values[i] = s_pending_uv[i];
-      s_is_night[i] = s_pending_night[i];
-      s_conditions[i] = s_pending_conditions[i];
-      s_gust[i] = s_pending_gust[i];
+      const uint8_t *b = s_pending_packed[i/6] + (i%6)*20;
+      int condition = b[17] | ((int)b[18]<<8);
+      if (s_conditions[i] != condition || s_is_night[i] != (b[19] ? 1 : 0))
+        invalidate_icon(i);
     }
+    for (int p = 0; p < (total+5)/6; p++)
+      decode_forecast_bytes(s_pending_packed[p], s_pending_packed_len[p]/20, p*6);
     s_forecast_count = total;
     s_is_metric = s_pending_metric;
     s_temp_unit = s_pending_temp_unit;
