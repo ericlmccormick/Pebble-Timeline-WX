@@ -490,16 +490,19 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     if (!s_pending_data[i][0][0] || !s_pending_data[i][1][0] ||
         !s_pending_data[i][2][0] || !s_pending_data[i][3][0]) { APP_LOG(APP_LOG_LEVEL_WARNING, "Missing data in part %d hour %d", number, i); return; }
   }
-  for (int i = start; i < end; i++) {
-    invalidate_icon(i);
-    memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
-    s_uv_values[i] = s_pending_uv[i];
-    s_is_night[i] = s_pending_night[i];
-    s_conditions[i] = s_pending_conditions[i];
-    s_gust[i] = s_pending_gust[i];
-  }
-  s_forecast_count = end;
-  if (number == 1) {
+  // Keep the last complete forecast visible until ALL chunks arrive.
+  // Never expose a partial refresh to the scrolling UI.
+  s_pending_next_part = number + 1;
+  if (end == total) {
+    for (int i = 0; i < total; i++) {
+      invalidate_icon(i);
+      memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
+      s_uv_values[i] = s_pending_uv[i];
+      s_is_night[i] = s_pending_night[i];
+      s_conditions[i] = s_pending_conditions[i];
+      s_gust[i] = s_pending_gust[i];
+    }
+    s_forecast_count = total;
     s_is_metric = s_pending_metric;
     s_wind_unit = s_pending_wind_unit;
     s_color_mode = s_pending_color_mode;
@@ -509,9 +512,11 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_gust_enabled = s_pending_gust_enabled;
     s_forecast_timestamp = s_pending_timestamp;
     s_cached = s_pending_cached;
-    if (s_scroll_offset > s_forecast_count - 6) s_scroll_offset = s_forecast_count > 6 ? s_forecast_count - 6 : 0;
+    if (s_scroll_offset > total - 6) s_scroll_offset = total > 6 ? total - 6 : 0;
     s_has_forecast = true;
+    s_pending_first = false;
     update_icons_for_view();
+    layer_mark_dirty(s_canvas_layer);
     if (s_pending_location[0]) {
       snprintf(s_location_name, sizeof(s_location_name), "%s", s_pending_location);
       s_show_banner = true;
@@ -519,11 +524,6 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       s_banner_timer = app_timer_register(3000, banner_timer_callback, NULL);
     }
   }
-  s_has_forecast = true;
-  s_pending_next_part = number + 1;
-  if (end == total) s_pending_first = false;
-  update_icons_for_view();
-  layer_mark_dirty(s_canvas_layer);
   s_last_acked_part = number;
   acknowledge_forecast_part(number);
   if (end == total) show_status(s_cached ? "Cached forecast" : "Weather updated");
