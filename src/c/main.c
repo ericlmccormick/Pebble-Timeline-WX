@@ -14,6 +14,17 @@ static int s_uv_values[24];             // Stores the raw UV index integers
 static int s_is_night[24];              // Boolean flag (1 or 0) for day/night icon selection
 static int s_conditions[24];            // OpenWeather condition ID codes (e.g., 500 = light rain)
 static GBitmap *s_icon_bitmaps[24];     // Pointers to the loaded image assets in memory
+static char s_pending_data[24][4][10];
+static int s_pending_uv[24], s_pending_night[24], s_pending_conditions[24], s_pending_gust[24];
+static int s_gust[24], s_forecast_count = 24, s_pending_count = 0;
+static int s_pending_wind_unit = 0;
+static bool s_pending_metric = false, s_pending_gust_enabled = false, s_gust_enabled = false;
+static time_t s_forecast_timestamp = 0, s_pending_timestamp = 0;
+static bool s_cached = false, s_pending_cached = false, s_pending_first = false;
+static int s_selected_hour = 0;
+static char s_pending_location[32] = "";
+static char s_status[48] = "";
+static AppTimer *s_status_timer = NULL;
 static int s_wind_unit = 0; // 0=mph, 1=km/h, 2=m/s, 3=knots
 static bool s_is_metric = false;        // Tracks user preference for Celsius/kmh vs Fahrenheit/mph
 
@@ -105,6 +116,17 @@ static void update_icons_for_view() {
 // ==============================================================================
 
 // Fired when the 3-second banner timer expires
+static void status_timer_callback(void *data) {
+  s_status_timer = NULL;
+  s_status[0] = '\0';
+  layer_mark_dirty(s_canvas_layer);
+}
+static void show_status(const char *message) {
+  snprintf(s_status, sizeof(s_status), "%s", message);
+  if (s_status_timer) app_timer_cancel(s_status_timer);
+  s_status_timer = app_timer_register(4000, status_timer_callback, NULL);
+  layer_mark_dirty(s_canvas_layer);
+}
 static void banner_timer_callback(void *data) {
   s_show_banner = false;            // Hide the banner
   update_icons_for_view();
@@ -123,8 +145,8 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 
 // Handles scrolling down through the timeline
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_scroll_offset < 18) {
-    s_scroll_offset = s_scroll_offset + 2 > 18 ? 18 : s_scroll_offset + 2;
+  if (s_scroll_offset < s_forecast_count - 6) {
+    s_scroll_offset = s_scroll_offset + 2 > s_forecast_count - 6 ? s_forecast_count - 6 : s_scroll_offset + 2;
     update_icons_for_view();        // Reload memory assets for the new view
     layer_mark_dirty(s_canvas_layer);
   }
@@ -132,6 +154,16 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 
 // Binds hardware buttons to click functions
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_gust_enabled && s_has_forecast) {
+    int idx = s_scroll_offset + s_selected_hour;
+    if (idx >= s_forecast_count) idx = s_forecast_count - 1;
+    char message[48];
+    const char *unit = s_wind_unit == 1 ? "km/h" : s_wind_unit == 2 ? "m/s" : s_wind_unit == 3 ? "kt" : "mph";
+    snprintf(message, sizeof(message), "Gust %d %s", s_gust[idx], unit);
+    show_status(message);
+    s_selected_hour = (s_selected_hour + 1) % (s_forecast_count - s_scroll_offset < 6 ? s_forecast_count - s_scroll_offset : 6);
+    return;
+  }
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK && out) {
     dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 1);
@@ -183,6 +215,8 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
   // Determine how many rows to draw based on banner visibility (to prevent overlapping)
   int visible_rows = s_show_banner ? 5 : 6;
+  if (visible_rows > s_forecast_count - s_scroll_offset) visible_rows = s_forecast_count - s_scroll_offset;
+  if (visible_rows < 1) visible_rows = 1;
   int bottom_margin = s_show_banner ? 20 : 0; // Reserves 20px at the bottom if banner is active
   const int grid_height = bounds.size.h - 24 - bottom_margin;
   const int row_height = grid_height / visible_rows;
@@ -268,6 +302,25 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
+  // Forecast freshness and temporary status, without changing the six-row grid.
+  if (s_has_forecast && s_forecast_timestamp) {
+    int age_minutes = (int)((time(NULL) - s_forecast_timestamp) / 60);
+    if (age_minutes < 0) age_minutes = 0;
+    char age[40];
+    snprintf(age, sizeof(age), "%s%d min old", s_cached ? "Cached " : "", age_minutes);
+    graphics_context_set_text_color(ctx, GColorDarkGray);
+    graphics_draw_text(ctx, age, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                       GRect(5, bounds.size.h - 18, bounds.size.w - 20, 18),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+  if (s_status[0]) {
+    graphics_context_set_fill_color(ctx, GColorMidnightGreen);
+    graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, s_status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                       GRect(6, bounds.size.h - 20, bounds.size.w - 12, 18),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
   // 7. Render Temporary Location Banner (Bottom of screen)
   if (s_show_banner) {
     graphics_context_set_fill_color(ctx, GColorMidnightGreen);
@@ -286,61 +339,74 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
 // Callback triggered whenever the phone sends a chunk of data
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
+  Tuple *part = dict_find(iterator, MESSAGE_KEY_TRANSFER_PART);
+  Tuple *status = dict_find(iterator, MESSAGE_KEY_STATUS_TEXT);
+  if (status) { show_status(status->value->cstring); return; }
+  if (!part) return;
+  int number = (int)part->value->int32;
+  if (number == 1) {
+    memset(s_pending_data, 0, sizeof(s_pending_data));
+    memset(s_pending_uv, 0, sizeof(s_pending_uv));
+    memset(s_pending_night, 0, sizeof(s_pending_night));
+    memset(s_pending_conditions, 0, sizeof(s_pending_conditions));
+    memset(s_pending_gust, 0, sizeof(s_pending_gust));
+    s_pending_first = true;
+    s_pending_count = 0;
+    s_pending_location[0] = '\0';
+  } else if (number != 2 || !s_pending_first) return;
   Tuple *t = dict_read_first(iterator);
-  bool location_received = false; // Flag to trigger the banner timer
-
-  // Iterate through all key/value pairs in the incoming dictionary
-  while(t != NULL) {
+  while (t) {
     uint32_t key = t->key;
-    
-    // Parse Location
-    if (key == MESSAGE_KEY_LOCATION_NAME) {
-      snprintf(s_location_name, sizeof(s_location_name), "Location: %s", t->value->cstring);
-      location_received = true;
-    } 
-    // Parse Units
-    else if (key == MESSAGE_KEY_UNITS) {
-      s_is_metric = (strcmp(t->value->cstring, "metric") == 0);
-    } else if (key == MESSAGE_KEY_WIND_UNIT) {
+    if (key == MESSAGE_KEY_LOCATION_NAME) snprintf(s_pending_location, sizeof(s_pending_location), "%s", t->value->cstring);
+    else if (key == MESSAGE_KEY_UNITS) s_pending_metric = strcmp(t->value->cstring, "metric") == 0;
+    else if (key == MESSAGE_KEY_WIND_UNIT) {
       const char *unit = t->value->cstring;
-      s_wind_unit = strcmp(unit, "kmh") == 0 ? 1 :
-                    strcmp(unit, "ms") == 0 ? 2 :
-                    strcmp(unit, "knots") == 0 ? 3 : 0;
-    } 
-    // Parse Array Data (Offsets applied using Message Key Math)
-    else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 24) {
-      int idx = key - MESSAGE_KEY_IS_NIGHT;
-      if (s_is_night[idx] != t->value->int32) invalidate_icon(idx);
-      s_is_night[idx] = t->value->int32;
-    } else if (key >= MESSAGE_KEY_COLUMN_COND && key < MESSAGE_KEY_COLUMN_COND + 24) {
-      int idx = key - MESSAGE_KEY_COLUMN_COND;
-      if (s_conditions[idx] != (int)t->value->int32) invalidate_icon(idx);
-      s_conditions[idx] = (int)t->value->int32;
-    } else if (key >= MESSAGE_KEY_COLUMN_TIME && key < MESSAGE_KEY_COLUMN_TIME + 24) {
-      snprintf(s_forecast_data[key - MESSAGE_KEY_COLUMN_TIME][0], 10, "%s", t->value->cstring);
-    } else if (key >= MESSAGE_KEY_COLUMN_TEMP && key < MESSAGE_KEY_COLUMN_TEMP + 24) {
-      snprintf(s_forecast_data[key - MESSAGE_KEY_COLUMN_TEMP][1], 10, "%s", t->value->cstring);
-    } else if (key >= MESSAGE_KEY_COLUMN_WIND && key < MESSAGE_KEY_COLUMN_WIND + 24) {
-      snprintf(s_forecast_data[key - MESSAGE_KEY_COLUMN_WIND][2], 10, "%s", t->value->cstring);
-    } else if (key >= MESSAGE_KEY_COLUMN_RAIN && key < MESSAGE_KEY_COLUMN_RAIN + 24) {
-      snprintf(s_forecast_data[key - MESSAGE_KEY_COLUMN_RAIN][3], 10, "%s", t->value->cstring);
-    } else if (key >= MESSAGE_KEY_COLUMN_UV && key < MESSAGE_KEY_COLUMN_UV + 24) {
-      s_uv_values[key - MESSAGE_KEY_COLUMN_UV] = (int)t->value->int32;
+      s_pending_wind_unit = strcmp(unit, "kmh") == 0 ? 1 : strcmp(unit, "ms") == 0 ? 2 : strcmp(unit, "knots") == 0 ? 3 : 0;
     }
-    
-    t = dict_read_next(iterator); // Move to the next key
+    else if (key == MESSAGE_KEY_FORECAST_TIMESTAMP) s_pending_timestamp = (time_t)t->value->int32;
+    else if (key == MESSAGE_KEY_FORECAST_CACHED) s_pending_cached = t->value->int32 != 0;
+    else if (key == MESSAGE_KEY_GUSTS_ENABLED) s_pending_gust_enabled = t->value->int32 != 0;
+    else if (key == MESSAGE_KEY_TRANSFER_COUNT || key == MESSAGE_KEY_FORECAST_COUNT) s_pending_count = (int)t->value->int32;
+    else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 24) s_pending_night[key-MESSAGE_KEY_IS_NIGHT] = t->value->int32;
+    else if (key >= MESSAGE_KEY_COLUMN_COND && key < MESSAGE_KEY_COLUMN_COND + 24) s_pending_conditions[key-MESSAGE_KEY_COLUMN_COND] = t->value->int32;
+    else if (key >= MESSAGE_KEY_COLUMN_TIME && key < MESSAGE_KEY_COLUMN_TIME + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TIME][0], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_TEMP && key < MESSAGE_KEY_COLUMN_TEMP + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TEMP][1], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_WIND && key < MESSAGE_KEY_COLUMN_WIND + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_WIND][2], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_RAIN && key < MESSAGE_KEY_COLUMN_RAIN + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_RAIN][3], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_UV && key < MESSAGE_KEY_COLUMN_UV + 24) s_pending_uv[key-MESSAGE_KEY_COLUMN_UV] = t->value->int32;
+    else if (key >= MESSAGE_KEY_COLUMN_GUST && key < MESSAGE_KEY_COLUMN_GUST + 24) s_pending_gust[key-MESSAGE_KEY_COLUMN_GUST] = atoi(t->value->cstring);
+    t = dict_read_next(iterator);
   }
-  
-  // Update UI and RAM buffers after processing the payload chunk
-  s_has_forecast = true;
-  update_icons_for_view();
-
-  // If the location payload arrived, begin the 3-second teardown timer
-  if (location_received && s_banner_timer == NULL) {
-    s_banner_timer = app_timer_register(3000, banner_timer_callback, NULL);
+  if (number == 2) {
+    s_pending_first = false;
+    if (s_pending_count < 1 || s_pending_count > 24) return;
+    for (int i=0;i<s_pending_count;i++) {
+      if (!s_pending_data[i][0][0]) return; // reject incomplete transfers
+    }
+    for (int i=0;i<24;i++) invalidate_icon(i);
+    memcpy(s_forecast_data, s_pending_data, sizeof(s_forecast_data));
+    memcpy(s_uv_values, s_pending_uv, sizeof(s_uv_values));
+    memcpy(s_is_night, s_pending_night, sizeof(s_is_night));
+    memcpy(s_conditions, s_pending_conditions, sizeof(s_conditions));
+    memcpy(s_gust, s_pending_gust, sizeof(s_gust));
+    s_forecast_count = s_pending_count;
+    s_is_metric = s_pending_metric;
+    s_wind_unit = s_pending_wind_unit;
+    s_gust_enabled = s_pending_gust_enabled;
+    s_forecast_timestamp = s_pending_timestamp;
+    s_cached = s_pending_cached;
+    if (s_scroll_offset > s_forecast_count - 6) s_scroll_offset = s_forecast_count > 6 ? s_forecast_count - 6 : 0;
+    s_has_forecast = true;
+    update_icons_for_view();
+    if (s_pending_location[0]) {
+      snprintf(s_location_name, sizeof(s_location_name), "%s", s_pending_location);
+      s_show_banner = true;
+      if (s_banner_timer) app_timer_cancel(s_banner_timer);
+      s_banner_timer = app_timer_register(3000, banner_timer_callback, NULL);
+    }
+    show_status(s_cached ? "Cached forecast" : "Weather updated");
+    layer_mark_dirty(s_canvas_layer);
   }
-
-  layer_mark_dirty(s_canvas_layer); // Redraw screen with new data
 }
 
 // ==============================================================================
@@ -370,6 +436,7 @@ static void init() {
 // App teardown
 static void deinit() {
   if (s_banner_timer) app_timer_cancel(s_banner_timer); // Clear lingering timers
+  if (s_status_timer) app_timer_cancel(s_status_timer);
   for(int i = 0; i < 24; i++) { 
     if(s_icon_bitmaps[i]) gbitmap_destroy(s_icon_bitmaps[i]); // Free graphic RAM
   }
