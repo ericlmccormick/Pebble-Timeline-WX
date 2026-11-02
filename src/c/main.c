@@ -26,8 +26,15 @@ static int s_selected_hour = 0;
 static char s_pending_location[32] = "";
 static char s_status[48] = "";
 static bool s_status_error = false;
+static bool s_status_critical = false;
+static bool s_critical_only = false;
 #define WEATHER_CONTROLS_HINT_KEY 7199
+#define WEATHER_MESSAGE_POLICY_KEY 7198
+#define NOTIFICATION_HEIGHT 20
 static AppTimer *s_status_timer = NULL;
+static AppTimer *s_slide_timer = NULL;
+static int s_notification_offset = NOTIFICATION_HEIGHT; // 0=fully visible, 20=hidden
+static bool s_notification_visible = false;
 static time_t s_sunrise = 0, s_sunset = 0;
 static time_t s_pending_sunrise = 0, s_pending_sunset = 0;
 static bool s_last_auto_dark = false;
@@ -43,9 +50,9 @@ static int s_scroll_offset = 0;
 static bool s_has_forecast = false; // True after receiving forecast data
 
 // Temporary Notification Banner State
-static char s_location_name[32] = "Retrieving weather..."; // Holds the city name or loading text
-static bool s_show_banner = true;                          // Toggles banner visibility
-static AppTimer *s_banner_timer = NULL;                    // Timer handle for auto-dismissing the banner
+static char s_location_name[32] = "Retrieving weather..."; // Kept for persistence metadata
+static bool s_show_banner = false; // Legacy layout flag; notifications now overlay six rows
+static AppTimer *s_banner_timer = NULL;
 
 // ==============================================================================
 // MEMORY MANAGEMENT & ASSET LOADING
@@ -133,26 +140,57 @@ static void update_icons_for_view() {
 // EVENT HANDLERS & NAVIGATION
 // ==============================================================================
 
-// Fired when the 3-second banner timer expires
+// Bottom notification overlay: small, nonblocking slide, never resizes forecast.
+static void slide_notification(void *data) {
+  s_slide_timer = NULL;
+  int target = s_notification_visible ? 0 : NOTIFICATION_HEIGHT;
+  if (s_notification_offset < target) {
+    s_notification_offset += 5;
+    if (s_notification_offset > target) s_notification_offset = target;
+  } else if (s_notification_offset > target) {
+    s_notification_offset -= 5;
+    if (s_notification_offset < target) s_notification_offset = target;
+  }
+  layer_mark_dirty(s_canvas_layer);
+  if (s_notification_offset != target)
+    s_slide_timer = app_timer_register(35, slide_notification, NULL);
+  else if (!s_notification_visible)
+    s_status[0] = '\0';
+}
+static void animate_notification(bool visible) {
+  s_notification_visible = visible;
+  if (!s_slide_timer && s_notification_offset != (visible ? 0 : NOTIFICATION_HEIGHT))
+    s_slide_timer = app_timer_register(35, slide_notification, NULL);
+  layer_mark_dirty(s_canvas_layer);
+}
+static void hide_notification(void) {
+  if (s_status_timer) { app_timer_cancel(s_status_timer); s_status_timer = NULL; }
+  s_status_critical = false;
+  animate_notification(false);
+}
 static void status_timer_callback(void *data) {
   s_status_timer = NULL;
-  s_status[0] = '\0';
-  layer_mark_dirty(s_canvas_layer);
+  if (!s_status_critical) animate_notification(false);
+}
+static void show_notification(const char *message, bool critical) {
+  if (!message || !message[0]) return;
+  if (!critical && (s_critical_only || s_status_critical)) return;
+  if (s_status_timer) { app_timer_cancel(s_status_timer); s_status_timer = NULL; }
+  snprintf(s_status, sizeof(s_status), "%s", message);
+  s_status_error = critical;
+  s_status_critical = critical;
+  animate_notification(true);
+  if (!critical)
+    s_status_timer = app_timer_register(4000, status_timer_callback, NULL);
 }
 static void show_status(const char *message) {
-  snprintf(s_status, sizeof(s_status), "%s", message);
-  s_status_error = strstr(message, "failed") || strstr(message, "Failed") ||
-                   strstr(message, "error") || strstr(message, "timed out") ||
-                   strstr(message, "unavailable");
-  if (s_status_timer) app_timer_cancel(s_status_timer);
-  s_status_timer = app_timer_register(4000, status_timer_callback, NULL);
-  layer_mark_dirty(s_canvas_layer);
+  show_notification(message, false);
 }
-static void banner_timer_callback(void *data) {
-  s_show_banner = false;            // Hide the banner
-  update_icons_for_view();
-  s_banner_timer = NULL;            // Clear the timer reference
-  layer_mark_dirty(s_canvas_layer); // Force a full UI redraw
+static void set_notification_policy(bool critical_only) {
+  s_critical_only = critical_only;
+  persist_write_bool(WEATHER_MESSAGE_POLICY_KEY, critical_only);
+  if (critical_only && s_notification_visible && !s_status_critical)
+    hide_notification();
 }
 
 // Handles scrolling up through the timeline
@@ -180,14 +218,14 @@ static void refresh_click_handler(ClickRecognizerRef recognizer, void *context) 
     dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 1);
     dict_write_end(out);
     app_message_outbox_send();
-    snprintf(s_location_name, sizeof(s_location_name), "Refreshing weather...");
-    s_show_banner = true;
-    update_icons_for_view();
-    if (s_banner_timer) { app_timer_cancel(s_banner_timer); s_banner_timer = NULL; }
-    layer_mark_dirty(s_canvas_layer);
+    show_status("Refreshing weather...");
   }
 }
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_status_critical) {
+    hide_notification();
+    return;
+  }
   if (s_gust_enabled && s_has_forecast) {
     int count = s_forecast_count - s_scroll_offset;
     if (count > 6) count = 6;
@@ -295,10 +333,10 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   }
 
   // Determine how many rows to draw based on banner visibility (to prevent overlapping)
-  int visible_rows = s_show_banner ? 5 : 6;
+  int visible_rows = 6;
   if (visible_rows > s_forecast_count - s_scroll_offset) visible_rows = s_forecast_count - s_scroll_offset;
   if (visible_rows < 1) visible_rows = 1;
-  int bottom_margin = s_show_banner ? 20 : 0; // Reserves 20px at the bottom if banner is active
+  int bottom_margin = 0; // Notifications slide over the grid without resizing it
   const int grid_height = bounds.size.h - 24 - bottom_margin;
   const int row_height = grid_height / visible_rows;
 
@@ -399,23 +437,15 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, dark ? GColorWhite : GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
-  // 7. Render Temporary Location Banner (Bottom of screen)
-  if (s_show_banner) {
-    graphics_context_set_fill_color(ctx, dark ? GColorDarkGray : GColorMidnightGreen);
-    graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
-    
-    graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, s_location_name, fonts_get_system_font(FONT_KEY_GOTHIC_14), 
-                       GRect(6, bounds.size.h - 20, bounds.size.w - 12, 16), 
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  }
-  if (s_status[0]) {
+  // 7. Render the nonmodal notification LAST, on top of the six-row grid.
+  if (s_status[0] && s_notification_offset < NOTIFICATION_HEIGHT) {
+    const int notification_y = bounds.size.h - NOTIFICATION_HEIGHT + s_notification_offset;
     graphics_context_set_fill_color(ctx, s_status_error ? GColorRed :
                                     (dark ? GColorDarkGray : GColorMidnightGreen));
-    graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(0, notification_y, bounds.size.w, NOTIFICATION_HEIGHT), 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorWhite);
     graphics_draw_text(ctx, s_status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                       GRect(6, bounds.size.h - 20, bounds.size.w - 12, 18),
+                       GRect(6, notification_y + 1, bounds.size.w - 12, NOTIFICATION_HEIGHT - 2),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 }
@@ -582,8 +612,15 @@ static void acknowledge_forecast_part(int number, int32_t transfer_id) {
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
   Tuple *part = dict_find(iterator, MESSAGE_KEY_TRANSFER_PART);
   Tuple *status = dict_find(iterator, MESSAGE_KEY_STATUS_TEXT);
-  if (status) { show_status(status->value->cstring); return; }
+  if (status && status->type == TUPLE_CSTRING) {
+    Tuple *level = dict_find(iterator, MESSAGE_KEY_STATUS_LEVEL);
+    show_notification(status->value->cstring, level && level->value->int32 == 1);
+    return;
+  }
   if (!part) {
+    Tuple *policy = dict_find(iterator, MESSAGE_KEY_MESSAGE_POLICY);
+    if (policy && policy->type == TUPLE_CSTRING)
+      set_notification_policy(strcmp(policy->value->cstring, "critical") == 0);
     Tuple *theme = dict_find(iterator, MESSAGE_KEY_COLOR_MODE);
     if (theme && theme->type == TUPLE_CSTRING) {
       const char *mode = theme->value->cstring;
@@ -702,9 +739,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     layer_mark_dirty(s_canvas_layer);
     if (s_pending_location[0]) {
       snprintf(s_location_name, sizeof(s_location_name), "%s", s_pending_location);
-      s_show_banner = true;
-      if (s_banner_timer) app_timer_cancel(s_banner_timer);
-      s_banner_timer = app_timer_register(3000, banner_timer_callback, NULL);
+      show_status(s_pending_location);
     }
     store_complete_forecast();
   }
@@ -733,6 +768,8 @@ static void init() {
   window_set_window_handlers(s_main_window, (WindowHandlers) { .load = main_window_load });
   window_stack_push(s_main_window, true);
   restore_persisted_forecast();
+  if (persist_exists(WEATHER_MESSAGE_POLICY_KEY))
+    s_critical_only = persist_read_bool(WEATHER_MESSAGE_POLICY_KEY);
   if (!persist_exists(WEATHER_CONTROLS_HINT_KEY)) {
     show_status("Hold SELECT to refresh");
     persist_write_bool(WEATHER_CONTROLS_HINT_KEY, true);
@@ -752,6 +789,7 @@ static void deinit() {
   tick_timer_service_unsubscribe();
   if (s_banner_timer) app_timer_cancel(s_banner_timer); // Clear lingering timers
   if (s_status_timer) app_timer_cancel(s_status_timer);
+  if (s_slide_timer) app_timer_cancel(s_slide_timer);
   for(int i = 0; i < 48; i++) { 
     invalidate_icon(i); // Free shared bitmaps only after their last reference
   }
