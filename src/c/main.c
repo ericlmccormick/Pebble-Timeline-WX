@@ -39,8 +39,8 @@ static void invalidate_icon(int idx) {
 }
 static void update_icons_for_view() {
   for(int i = 0; i < 24; i++) {
-    // Check if the index falls within the currently visible 6-hour window
-    if (i >= s_scroll_offset && i < s_scroll_offset + 6) {
+    // Check if the index falls within the currently visible 7-hour window
+    if (i >= s_scroll_offset && i < s_scroll_offset + (s_show_banner ? 6 : 7)) {
       
       // If the icon isn't loaded yet, and we have valid condition data
       if (!s_icon_bitmaps[i] && s_conditions[i] != 0) {
@@ -107,6 +107,7 @@ static void update_icons_for_view() {
 // Fired when the 3-second banner timer expires
 static void banner_timer_callback(void *data) {
   s_show_banner = false;            // Hide the banner
+  update_icons_for_view();
   s_banner_timer = NULL;            // Clear the timer reference
   layer_mark_dirty(s_canvas_layer); // Force a full UI redraw
 }
@@ -114,7 +115,7 @@ static void banner_timer_callback(void *data) {
 // Handles scrolling up through the timeline
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_scroll_offset > 0) {
-    s_scroll_offset -= 2;           // Shift the view window up by 2 hours
+    s_scroll_offset = s_scroll_offset > 2 ? s_scroll_offset - 2 : 0;
     update_icons_for_view();        // Reload memory assets for the new view
     layer_mark_dirty(s_canvas_layer); 
   }
@@ -122,8 +123,8 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 
 // Handles scrolling down through the timeline
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_scroll_offset < 18) {       // Prevent scrolling past the 24th hour (24 total - 6 visible)
-    s_scroll_offset += 2;           // Shift the view window down by 2 hours
+  if (s_scroll_offset < 17) {
+    s_scroll_offset = s_scroll_offset + 2 > 17 ? 17 : s_scroll_offset + 2;
     update_icons_for_view();        // Reload memory assets for the new view
     layer_mark_dirty(s_canvas_layer);
   }
@@ -138,6 +139,7 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
     app_message_outbox_send();
     snprintf(s_location_name, sizeof(s_location_name), "Refreshing weather...");
     s_show_banner = true;
+    update_icons_for_view();
     if (s_banner_timer) { app_timer_cancel(s_banner_timer); s_banner_timer = NULL; }
     layer_mark_dirty(s_canvas_layer);
   }
@@ -166,7 +168,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
                      s_wind_unit == 2 ? "m/s" :
                      s_wind_unit == 3 ? "kt" : "MPH"; 
   char *headers[] = {"Time", "Cond", temp_label, wind_label, "Rain"};
-  int x_pos[] = {5, 42, 85, 122, 160}; // X-coordinates for each column
+  int x_pos[] = {5, 42, 85, 122, 166}; // X-coordinates for each column
 
   // 3. Draw Header Background Bar
   graphics_context_set_fill_color(ctx, GColorLightGray);
@@ -180,18 +182,18 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   }
 
   // Determine how many rows to draw based on banner visibility (to prevent overlapping)
-  int visible_rows = s_show_banner ? 5 : 6;
+  int visible_rows = s_show_banner ? 6 : 7;
   int bottom_margin = s_show_banner ? 20 : 0; // Reserves 20px at the bottom if banner is active
 
   // 5. Draw the Data Grid
   for(int i = 0; i < visible_rows; i++) {
     int idx = i + s_scroll_offset;    // The actual data array index based on scroll position
-    int y = 24 + (i * 30);            // The vertical pixel coordinate for the current row
+    int y = 24 + (i * 27);            // The vertical pixel coordinate for the current row
     
     // Feature: Highlight the "Current Hour" (Row 0) with a blue indicator on the left
     if (idx == 0 && !s_show_banner) {
       graphics_context_set_fill_color(ctx, GColorPictonBlue);
-      graphics_fill_rect(ctx, GRect(0, y, 3, 28), 0, GCornerNone);
+      graphics_fill_rect(ctx, GRect(0, y, 3, 26), 0, GCornerNone);
     }
 
     // Draw row separator line
@@ -201,12 +203,12 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     // Draw Time Column
     graphics_context_set_text_color(ctx, GColorBlack);
     graphics_draw_text(ctx, s_forecast_data[idx][0], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
-                       GRect(x_pos[0], y + 2, 35, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+                       GRect(x_pos[0], y, 35, 27), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     
     // Draw Condition Icon
     if(s_icon_bitmaps[idx]) {
       graphics_context_set_compositing_mode(ctx, GCompOpSet);
-      graphics_draw_bitmap_in_rect(ctx, s_icon_bitmaps[idx], GRect(x_pos[1], y + 1, 28, 28));
+      graphics_draw_bitmap_in_rect(ctx, s_icon_bitmaps[idx], GRect(x_pos[1], y + 1, 25, 25));
     }
 
     // Draw Temperature Column (Semantic High/Low Colors)
@@ -221,27 +223,27 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     }
     graphics_context_set_text_color(ctx, temp_color);
     graphics_draw_text(ctx, s_forecast_data[idx][1], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
-                       GRect(x_pos[2], y + 2, 40, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+                       GRect(x_pos[2], y, 40, 27), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
     // Draw Wind Column (High Wind Warning Color)
     int wind_val = atoi(s_forecast_data[idx][2]);
     graphics_context_set_text_color(ctx, (wind_val >= (s_wind_unit == 1 ? 32 : s_wind_unit == 2 ? 9 : s_wind_unit == 3 ? 17 : 20)) ? GColorOrange : GColorBlack);
     graphics_draw_text(ctx, s_forecast_data[idx][2], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
-                       GRect(x_pos[3], y + 2, 38, 28), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+                       GRect(x_pos[3], y, 38, 27), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
     // Draw Rain Probability Pie Chart
     int rain_val = atoi(s_forecast_data[idx][3]); 
-    GRect rain_rect = GRect(x_pos[4], y + 4, 22, 22); // Bounding box for the circle
+    GRect rain_rect = GRect(x_pos[4], y + 3, 21, 21); // Bounding box for the circle
     
     // Draw the empty background ring
-    graphics_context_set_stroke_color(ctx, GColorLightGray);
+    graphics_context_set_stroke_color(ctx, GColorDarkGray);
     graphics_draw_arc(ctx, rain_rect, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
     
     if (rain_val > 0) {
       // Calculate wedge size and draw the filled arc
       graphics_context_set_fill_color(ctx, GColorPictonBlue);
       int32_t rain_angle = (TRIG_MAX_ANGLE * rain_val) / 100;
-      graphics_fill_radial(ctx, rain_rect, GOvalScaleModeFitCircle, 11, 0, rain_angle); // 11 is radius inset
+      graphics_fill_radial(ctx, rain_rect, GOvalScaleModeFitCircle, 10, 0, rain_angle); // 11 is radius inset
     }
 
     // Draw UV Safety Bar on the far right edge
@@ -252,7 +254,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     if(uv > 7) uv_color = GColorRed;
     if(uv > 10) uv_color = GColorPurple;
     graphics_context_set_fill_color(ctx, uv_color);
-    graphics_fill_rect(ctx, GRect(bounds.size.w - 10, y + 1, 8, 28), 2, GCornersAll); // 8px wide, 2px rounded corners
+    graphics_fill_rect(ctx, GRect(bounds.size.w - 10, y + 1, 8, 25), 2, GCornersAll); // 8px wide, 2px rounded corners
   }
 
   // 6. Draw Scroll Track Indicator
@@ -260,7 +262,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, 24, 2, bounds.size.h - 24 - bottom_margin), 0, GCornerNone);
   
   // Calculate relative handle position based on offset
-  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 18);
+  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 17);
   graphics_context_set_fill_color(ctx, GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
