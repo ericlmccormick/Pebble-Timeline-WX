@@ -643,7 +643,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   s_pending_next_part = number + 1;
   if (end == total) {
     for (int i = 0; i < total; i++) {
-      invalidate_icon(i);
+      if (s_conditions[i] != s_pending_conditions[i] || s_is_night[i] != s_pending_night[i]) invalidate_icon(i);
       memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
       s_uv_values[i] = s_pending_uv[i];
       s_is_night[i] = s_pending_night[i];
@@ -663,7 +663,6 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     if (s_scroll_offset > total - 6) s_scroll_offset = total > 6 ? total - 6 : 0;
     s_has_forecast = true;
     s_pending_first = false;
-    store_complete_forecast();
     update_icons_for_view();
     layer_mark_dirty(s_canvas_layer);
     if (s_pending_location[0]) {
@@ -672,6 +671,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       if (s_banner_timer) app_timer_cancel(s_banner_timer);
       s_banner_timer = app_timer_register(3000, banner_timer_callback, NULL);
     }
+    store_complete_forecast();
   }
   s_last_acked_part = number;
   s_last_acked_transfer_id = transfer_id;
