@@ -387,6 +387,16 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 // Callback triggered whenever the phone sends a chunk of data
 static int s_last_acked_part = 0;
 
+static void forecast_outbox_sent(DictionaryIterator *iterator, void *context) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Watch outbox message delivered");
+}
+static void forecast_outbox_failed(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
+  APP_LOG(APP_LOG_LEVEL_ERROR, "Watch outbox delivery FAILED: %d", reason);
+}
+static void forecast_inbox_dropped(AppMessageResult reason, void *context) {
+  APP_LOG(APP_LOG_LEVEL_ERROR, "Watch inbox message DROPPED: %d", reason);
+}
+
 static void acknowledge_forecast_part(int number) {
   DictionaryIterator *out = NULL;
   AppMessageResult result = app_message_outbox_begin(&out);
@@ -540,6 +550,9 @@ static void init() {
   
   // Each message carries six hours; acknowledge validated chunks.
   app_message_register_inbox_received(inbox_received_callback);
+  app_message_register_inbox_dropped(forecast_inbox_dropped);
+  app_message_register_outbox_sent(forecast_outbox_sent);
+  app_message_register_outbox_failed(forecast_outbox_failed);
   app_message_open(2048, 256);
   tick_timer_service_subscribe(MINUTE_UNIT, auto_theme_tick); 
 }
