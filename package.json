@@ -11,7 +11,7 @@
       "configurable",
       "health"
     ],
-    "displayName": "Scrollable Hourly Weather",
+    "displayName": "Timeline WX",
     "enableMultiJS": true,
     "messageKeys": [
       "COLUMN_TIME[48]",
