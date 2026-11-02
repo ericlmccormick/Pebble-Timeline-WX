@@ -19,21 +19,19 @@ var transferQueue = [];
 var transferBusy = false;
 var refreshQueued = false;
 var startupCacheFallback = false;
-var lastSentFingerprint = null;
 var lastCompletedFingerprint = null;
 var queuedFingerprint = null;
 var pendingRefreshForceLocation = false;
 var lastLocation = null;
 try { lastLocation = JSON.parse(localStorage.getItem('lastWeatherLocation')); } catch (e) { lastLocation = null; }
 var nextTransferId = (Date.now() % 2000000000);
-var lastSuccessfulTransfer = null;
 
 function scheduleRetry() {
   requestInProgress = false;
   if (retryCount >= MAX_RETRIES) { if (startupCacheFallback) { startupCacheFallback = false; sendCachedWeather(); } showStatus('Update failed - old data'); return; }
   retryCount++;
   if (retryTimer) clearTimeout(retryTimer);
-  retryTimer = setTimeout(fetchWeather, Math.min(60000 * Math.pow(2, retryCount - 1), 240000));
+  retryTimer = setTimeout(function() { retryTimer = null; fetchWeather(); }, Math.min(60000 * Math.pow(2, retryCount - 1), 240000));
 }
 
 function showStatus(message) {
@@ -399,7 +397,6 @@ function finishTransfer() {
 function sendTransferPart(index, attempt) {
   if (!activeTransfer) return;
   if (index >= activeTransfer.length) {
-    lastSuccessfulTransfer = activeTransfer[0][keys.TRANSFER_ID];
     lastCompletedFingerprint = activeTransfer.forecastFingerprint || null;
     if (lastCompletedFingerprint === queuedFingerprint) queuedFingerprint = null;
     console.log('Forecast transfer complete');
