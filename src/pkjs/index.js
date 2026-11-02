@@ -68,7 +68,7 @@ function sendThemeSetting() {
 function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var settings=currentSettings(), units=setting(settings,keys.TEMP_UNIT,'TEMP_UNIT','F');
   var wind=windPreference(settings,units), count=Math.min(hours.length,48);
-  var chunks=[{},{},{},{}];
+  var chunks=Array.from({length:Math.ceil(count/6)},function(){return {};});
   var first=chunks[0];
   first[keys.COLOR_MODE]=setting(settings,keys.COLOR_MODE,'COLOR_MODE','auto');
   if(hours.sunrise&&hours.sunset){first[keys.SUNRISE]=hours.sunrise;first[keys.SUNSET]=hours.sunset;}
@@ -80,7 +80,7 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   first[keys.GUSTS_ENABLED]=gustsEnabled?1:0;
   first[keys.FORECAST_COUNT]=count;
   for(var i=0;i<count;i++){
-    var h=hours[i],t=chunks[Math.floor(i/12)];
+    var h=hours[i],t=chunks[Math.floor(i/6)];
     t[keys.COLUMN_TIME+i]=h.time;
     t[keys.COLUMN_TEMP+i]=h.temp;
     t[keys.COLUMN_WIND+i]=h.wind;
@@ -90,8 +90,8 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
     t[keys.IS_NIGHT+i]=h.night;
     t[keys.COLUMN_GUST+i]=h.gust;
   }
-  for(var j=0;j<4;j++)chunks[j][keys.TRANSFER_PART]=j+1;
-  chunks[3][keys.TRANSFER_COUNT]=count;
+  for(var j=0;j<chunks.length;j++)chunks[j][keys.TRANSFER_PART]=j+1;
+  chunks[0][keys.TRANSFER_COUNT]=count;
   sendWeatherChunks(chunks);
 }
 function wmoCode(c) {
@@ -282,19 +282,46 @@ function sendWeatherChunks(chunks) {
   if (transferQueue.length > 3) transferQueue.splice(0, transferQueue.length - 2);
   drainTransfers();
 }
+var awaitingPart = 0;
+var ackTimer = null;
+var activeTransfer = null;
 function drainTransfers() {
-  if(transferBusy||!transferQueue.length)return;
-  transferBusy=true;
-  var chunks=transferQueue.shift();
-  function finish(){transferBusy=false;drainTransfers();}
-  function sendPart(i){
-    if(i===chunks.length){console.log('48-hour forecast delivered');finish();return;}
-    Pebble.sendAppMessage(chunks[i],function(){sendPart(i+1);},function(e){
-      console.log('Forecast part '+(i+1)+' failed: '+JSON.stringify(e));
-      showStatus('Watch transfer failed');finish();
-    });
-  }
-  sendPart(0);
+  if (transferBusy || !transferQueue.length) return;
+  transferBusy = true;
+  activeTransfer = transferQueue.shift();
+  sendTransferPart(0, 0);
+}
+function finishTransfer() {
+  if (ackTimer) clearTimeout(ackTimer);
+  ackTimer = null;
+  awaitingPart = 0;
+  activeTransfer = null;
+  transferBusy = false;
+  drainTransfers();
+}
+function sendTransferPart(index, attempt) {
+  if (!activeTransfer) return;
+  if (index >= activeTransfer.length) { finishTransfer(); return; }
+  awaitingPart = index + 1;
+  Pebble.sendAppMessage(activeTransfer[index], function() {
+    if (ackTimer) clearTimeout(ackTimer);
+    ackTimer = setTimeout(function() {
+      if (awaitingPart !== index + 1) return;
+      if (attempt < 3) sendTransferPart(index, attempt + 1);
+      else { showStatus('Forecast transfer timed out'); finishTransfer(); }
+    }, 3500);
+  }, function(err) {
+    console.log('Part '+(index+1)+' failed: '+JSON.stringify(err));
+    if (attempt < 3) setTimeout(function(){sendTransferPart(index,attempt+1);},500);
+    else {showStatus('Watch transfer failed');finishTransfer();}
+  });
+}
+function acknowledgePart(part) {
+  if (!activeTransfer || part !== awaitingPart) return;
+  if (ackTimer) clearTimeout(ackTimer);
+  ackTimer = null;
+  awaitingPart = 0;
+  sendTransferPart(part, 0);
 }
 
 // ==============================================================================
@@ -311,7 +338,11 @@ Pebble.addEventListener('ready', function() {
   refreshTimer=setInterval(fetchWeather,REFRESH_MS);
 });
 Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload && e.payload[keys.REFRESH_REQUEST]) fetchWeather();
+  if (e.payload && e.payload[keys.REFRESH_REQUEST]) {
+    var request = Number(e.payload[keys.REFRESH_REQUEST]);
+    if (request >= 101 && request <= 108) acknowledgePart(request - 100);
+    else fetchWeather();
+  }
 });
 
 // Triggers when the user closes the Clay Settings menu on their phone
