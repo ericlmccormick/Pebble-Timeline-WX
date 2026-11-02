@@ -111,7 +111,7 @@ function fetchWeather() {
         
         // Prepare two separate dictionaries to prevent Bluetooth MTU overflow
         var hoursData = [];
-        var gustsEnabled = settings[keys.SHOW_GUSTS] === true || settings[keys.SHOW_GUSTS] === 'true';
+        var gustsEnabled = settings[keys.SHOW_GUSTS] === true || settings[keys.SHOW_GUSTS] === 'true' || settings[keys.SHOW_GUSTS] === 1;
 
         // 3. Process the next 24 hours of forecast data
         for(var i = 0; i < 24; i++) {
