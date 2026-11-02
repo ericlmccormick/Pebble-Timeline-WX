@@ -28,16 +28,20 @@ var nextTransferId = (Date.now() % 2000000000);
 
 function scheduleRetry() {
   requestInProgress = false;
-  if (retryCount >= MAX_RETRIES) { if (startupCacheFallback) { startupCacheFallback = false; sendCachedWeather(); } showStatus('Update failed - old data'); return; }
+  if (retryCount >= MAX_RETRIES) { if (startupCacheFallback) { startupCacheFallback = false; sendCachedWeather(); } showStatus('Update failed - old data', true); return; }
   retryCount++;
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = setTimeout(function() { retryTimer = null; fetchWeather(); }, Math.min(60000 * Math.pow(2, retryCount - 1), 240000));
 }
 
-function showStatus(message) {
+// Severity is explicit so "Critical only" does not depend on message wording.
+function showStatus(message, critical) {
   var payload = {};
   payload[keys.STATUS_TEXT] = message;
-  Pebble.sendAppMessage(payload, null, function(e) { console.log('Status delivery failed'); });
+  payload[keys.STATUS_LEVEL] = critical ? 1 : 0;
+  Pebble.sendAppMessage(payload, null, function(e) {
+    console.log('Status delivery failed: ' + JSON.stringify(e));
+  });
 }
 function currentSettings() {
   try { return JSON.parse(localStorage.getItem('clay-settings')) || {}; } catch(e) { return {}; }
@@ -59,7 +63,7 @@ function sendCachedWeather() {
     var locQuery = String(setting(settings, keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim();
     if ((cache.locationMode || 'gps') !== locMode || (cache.locationQuery || '') !== locQuery) return false;
     var hours = cache.hours.filter(function(h) { return h.dt >= Math.floor(Date.now()/1000) - 3600; });
-    if (!hours.length) { showStatus('Forecast expired'); return false; }
+    if (!hours.length) { showStatus('Forecast expired', true); return false; }
     hours.sunrise = cache.sunrise;
     hours.sunset = cache.sunset;
     transmitHours(hours, cache.location, cache.savedAt, true, cache.gustsEnabled);
@@ -70,6 +74,7 @@ function sendThemeSetting() {
   var settings = currentSettings();
   var msg = {};
   msg[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
+  msg[keys.MESSAGE_POLICY] = setting(settings, keys.MESSAGE_POLICY, 'MESSAGE_POLICY', 'all');
   Pebble.sendAppMessage(msg, null, function(e) { console.log('Theme update failed: ' + JSON.stringify(e)); });
 }
 // Each row uses 20 bytes: ASCII time[4], numeric ASCII temperature[7],
@@ -259,7 +264,7 @@ function fetchWeather(forceLocation) {
   var timeFormat=setting(s,keys.TIME_FORMAT,'TIME_FORMAT','12h');
   var locationMode=setting(s,keys.LOCATION_MODE,'LOCATION_MODE','gps');
   var locationQuery=String(setting(s,keys.LOCATION_QUERY,'LOCATION_QUERY','')).trim();
-  function fail(message){console.log(message);showStatus(message);scheduleRetry();}
+  function fail(message){console.log(message);showStatus(message, true);scheduleRetry();}
   function run(lat,lon,label) {
     var providers=provider==='auto'?(lat>=24&&lat<=50&&lon>=-125&&lon<=-66?
       ['openmeteo','nws','metno']:['openmeteo','metno']):[provider];
@@ -417,7 +422,7 @@ function sendTransferPart(index, attempt) {
     ackTimer = null;
     console.log('ACK timeout for part ' + part);
     if (attempt < MAX_PART_RETRIES) sendTransferPart(index, attempt + 1);
-    else { queuedFingerprint = null; showStatus('Forecast transfer timed out'); finishTransfer(); }
+    else { queuedFingerprint = null; showStatus('Forecast transfer timed out', true); finishTransfer(); }
   }, ACK_TIMEOUT_MS);
   Pebble.sendAppMessage(activeTransfer[index], function() {
     if (generation !== transferGeneration || sequence !== sendSequence) return;
@@ -432,7 +437,7 @@ function sendTransferPart(index, attempt) {
         if (generation === transferGeneration && sequence === sendSequence && awaitingPart === part)
           sendTransferPart(index, attempt + 1);
       }, 1000);
-    } else { queuedFingerprint = null; showStatus('Watch transfer failed'); finishTransfer(); }
+    } else { queuedFingerprint = null; showStatus('Watch transfer failed', true); finishTransfer(); }
   });
 }
 function acknowledgePart(part, transferId) {
