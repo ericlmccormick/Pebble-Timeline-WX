@@ -388,6 +388,8 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
 // Callback triggered whenever the phone sends a chunk of data
 static int s_last_acked_part = 0;
+static int32_t s_pending_transfer_id = 0;
+static int32_t s_last_acked_transfer_id = 0;
 
 static void forecast_outbox_sent(DictionaryIterator *iterator, void *context) {
   APP_LOG(APP_LOG_LEVEL_INFO, "Watch outbox message delivered");
@@ -399,7 +401,7 @@ static void forecast_inbox_dropped(AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "Watch inbox message DROPPED: %d", reason);
 }
 
-static void acknowledge_forecast_part(int number) {
+static void acknowledge_forecast_part(int number, int32_t transfer_id) {
   DictionaryIterator *out = NULL;
   AppMessageResult result = app_message_outbox_begin(&out);
   if (result != APP_MSG_OK || !out) {
@@ -407,6 +409,7 @@ static void acknowledge_forecast_part(int number) {
     return;
   }
   dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 100 + number);
+  dict_write_int32(out, MESSAGE_KEY_TRANSFER_ID, transfer_id);
   result = app_message_outbox_send();
   APP_LOG(result == APP_MSG_OK ? APP_LOG_LEVEL_INFO : APP_LOG_LEVEL_WARNING,
           "ACK part %d: %d", number, result);
@@ -426,18 +429,25 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
     return;
   }
+  Tuple *id_tuple = dict_find(iterator, MESSAGE_KEY_TRANSFER_ID);
+  if (!id_tuple) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Forecast chunk without transaction ID");
+    return;
+  }
+  int32_t transfer_id = id_tuple->value->int32;
   int number = (int)part->value->int32;
   if (number < 1 || number > 8) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast part %d", number);
     return;
   }
   // Retry of an already accepted part, including the FINAL part.
-  if (number == s_last_acked_part && (number != 1 || s_pending_first)) {
+  if (transfer_id == s_last_acked_transfer_id && number == s_last_acked_part) {
     APP_LOG(APP_LOG_LEVEL_INFO, "Duplicate forecast part %d; re-ACK", number);
-    acknowledge_forecast_part(number);
+    acknowledge_forecast_part(number, transfer_id);
     return;
   }
   if (number == 1) {
+    s_pending_transfer_id = transfer_id;
     s_last_acked_part = 0;
     memset(s_pending_data, 0, sizeof(s_pending_data));
     memset(s_pending_uv, 0, sizeof(s_pending_uv));
@@ -448,9 +458,9 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_pending_next_part = 2;
     s_pending_count = 0;
     s_pending_location[0] = '\0';
-  } else if (!s_pending_first || number > 8 || (number != s_pending_next_part && number != s_pending_next_part - 1)) return;
+  } else if (!s_pending_first || transfer_id != s_pending_transfer_id || (number != s_pending_next_part && number != s_pending_next_part - 1)) return;
   if (number != 1 && number == s_pending_next_part - 1) {
-    acknowledge_forecast_part(number);
+    acknowledge_forecast_part(number, transfer_id);
     return;
   }
   APP_LOG(APP_LOG_LEVEL_INFO, "Receiving forecast part %d", number);
@@ -483,10 +493,39 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     else if (key >= MESSAGE_KEY_COLUMN_GUST && key < MESSAGE_KEY_COLUMN_GUST + 48) s_pending_gust[key-MESSAGE_KEY_COLUMN_GUST] = atoi(t->value->cstring);
     t = dict_read_next(iterator);
   }
+  Tuple *blob = dict_find(iterator, MESSAGE_KEY_FORECAST_BLOB);
+  if (blob) {
+    int count = blob->length / 20;
+    if (blob->type != TUPLE_BYTE_ARRAY || blob->length == 0 ||
+        blob->length % 20 != 0 || count > 6) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid compact chunk length %d", blob->length);
+      return;
+    }
+    const uint8_t *data = blob->value->data;
+    const int offset = (number - 1) * 6;
+    for (int r = 0; r < count && offset+r < 48; r++) {
+      int i = offset + r;
+      const uint8_t *b = data + r * 20;
+      memcpy(s_pending_data[i][0], b, 4);
+      s_pending_data[i][0][4] = '\0';
+      memcpy(s_pending_data[i][1], b + 4, 7);
+      s_pending_data[i][1][7] = '\0';
+      unsigned int wind = b[11] | ((unsigned int)b[12] << 8);
+      unsigned int gust = b[13] | ((unsigned int)b[14] << 8);
+      snprintf(s_pending_data[i][2], 10, "%u", wind);
+      if (b[15] == 255) snprintf(s_pending_data[i][3], 10, "--");
+      else snprintf(s_pending_data[i][3], 10, "%u%%", b[15]);
+      s_pending_uv[i] = b[16] == 255 ? -1 : (int)b[16];
+      s_pending_conditions[i] = b[17] | ((int)b[18] << 8);
+      s_pending_night[i] = b[19] ? 1 : 0;
+      s_pending_gust[i] = (int)gust;
+    }
+  }
   int total = s_pending_count;
   if (total < 1 || total > 48) { APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast count %d in part %d", total, number); return; }
   int start = (number - 1) * 6;
   int end = start + 6 < total ? start + 6 : total;
+  if (blob && blob->length != (end - start) * 20) { APP_LOG(APP_LOG_LEVEL_WARNING, "Incomplete compact part %d", number); return; }
   if (start >= total) { APP_LOG(APP_LOG_LEVEL_WARNING, "Part %d outside count %d", number, total); return; }
   for (int i = start; i < end; i++) {
     if (!s_pending_data[i][0][0] || !s_pending_data[i][1][0] ||
@@ -527,7 +566,8 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
   }
   s_last_acked_part = number;
-  acknowledge_forecast_part(number);
+  s_last_acked_transfer_id = transfer_id;
+  acknowledge_forecast_part(number, transfer_id);
   if (end == total) show_status(s_cached ? "Cached forecast" : "Weather updated");
 }
 
