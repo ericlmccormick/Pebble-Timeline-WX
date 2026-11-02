@@ -26,7 +26,16 @@
             "IS_NIGHT[24]",
             "LOCATION_NAME",
             "REFRESH_REQUEST",
-            "WIND_UNIT"
+            "WIND_UNIT",
+            "COLUMN_GUST[24]",
+            "SHOW_GUSTS",
+            "GUSTS_ENABLED",
+            "FORECAST_TIMESTAMP",
+            "FORECAST_CACHED",
+            "FORECAST_COUNT",
+            "TRANSFER_PART",
+            "TRANSFER_COUNT",
+            "STATUS_TEXT"
         ],
         "projectType": "native",
         "resources": {
