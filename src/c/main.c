@@ -25,6 +25,8 @@ static int s_pending_next_part = 0;
 static int s_selected_hour = 0;
 static char s_pending_location[32] = "";
 static char s_status[48] = "";
+static bool s_status_error = false;
+#define WEATHER_CONTROLS_HINT_KEY 7199
 static AppTimer *s_status_timer = NULL;
 static time_t s_sunrise = 0, s_sunset = 0;
 static time_t s_pending_sunrise = 0, s_pending_sunset = 0;
@@ -139,6 +141,9 @@ static void status_timer_callback(void *data) {
 }
 static void show_status(const char *message) {
   snprintf(s_status, sizeof(s_status), "%s", message);
+  s_status_error = strstr(message, "failed") || strstr(message, "Failed") ||
+                   strstr(message, "error") || strstr(message, "timed out") ||
+                   strstr(message, "unavailable");
   if (s_status_timer) app_timer_cancel(s_status_timer);
   s_status_timer = app_timer_register(4000, status_timer_callback, NULL);
   layer_mark_dirty(s_canvas_layer);
@@ -255,7 +260,8 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   bool dark = is_dark_mode();
   GColor foreground = dark ? GColorWhite : GColorBlack;
   GColor background = dark ? GColorBlack : GColorWhite;
-  GColor header_color = dark ? GColorDarkGray : GColorLightGray;
+  // A high-contrast Pebble-style header distinguishes controls from data.
+  GColor header_color = dark ? GColorDarkGray : GColorMidnightGreen;
   GColor separator_color = dark ? GColorDarkGray : GColorLightGray;
   // 1. Draw appearance-dependent background
   graphics_context_set_fill_color(ctx, background);
@@ -273,10 +279,18 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, header_color);
   graphics_fill_rect(ctx, GRect(0, 0, bounds.size.w, 24), 0, GCornerNone);
 
-  // 4. Draw Header Text
-  graphics_context_set_text_color(ctx, foreground);
+  // 4. Draw Header Text. Scale the font down when space is constrained;
+  // keep the same five columns and six-row forecast layout.
+  graphics_context_set_text_color(ctx, GColorWhite);
+  GFont header_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+#if defined(PBL_SDK_4)
+  if (preferred_content_size() >= PreferredContentSizeLarge)
+    header_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+#endif
+  if (bounds.size.w < 200)
+    header_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
   for(int i = 0; i < 5; i++) {
-    graphics_draw_text(ctx, headers[i], fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), 
+    graphics_draw_text(ctx, headers[i], header_font, 
                        GRect(x_pos[i], 0, i == 3 ? 38 : 42, 24), GTextOverflowModeTrailingEllipsis, i == 3 ? GTextAlignmentCenter : GTextAlignmentLeft, NULL);
   }
 
@@ -293,8 +307,10 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     int idx = i + s_scroll_offset;    // The actual data array index based on scroll position
     int y = 24 + (i * grid_height) / visible_rows; // Distribute rows evenly to the bottom
     
-    // Feature: Highlight the "Current Hour" (Row 0) with a blue indicator on the left
-    if (idx == 0 && !s_show_banner) {
+    // A quiet fill and narrow blue rule mark the current forecast hour.
+    if (idx == 0) {
+      graphics_context_set_fill_color(ctx, dark ? GColorDarkGray : GColorLightGray);
+      graphics_fill_rect(ctx, GRect(0, y, bounds.size.w - 3, row_height), 0, GCornerNone);
       graphics_context_set_fill_color(ctx, GColorPictonBlue);
       graphics_fill_rect(ctx, GRect(0, y, 3, row_height - 2), 0, GCornerNone);
     }
@@ -305,7 +321,14 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
     // Draw Time Column
     graphics_context_set_text_color(ctx, foreground);
-    graphics_draw_text(ctx, s_forecast_data[idx][0], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
+    GFont row_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+    GFont small_row_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+#if defined(PBL_SDK_4)
+    // Pebble OS 4+: honor the larger accessibility preference where possible.
+    if (preferred_content_size() == PreferredContentSizeExtraLarge)
+      row_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+#endif
+    graphics_draw_text(ctx, s_forecast_data[idx][0], row_font, 
                        GRect(x_pos[0], y + 1, 35, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     
     // Draw Condition Icon
@@ -323,13 +346,15 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     if (temp_val >= hot_threshold) temp_color = GColorRed;
     else if (temp_val <= cold_threshold) temp_color = GColorBlue;
     graphics_context_set_text_color(ctx, temp_color);
-    graphics_draw_text(ctx, s_forecast_data[idx][1], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
+    graphics_draw_text(ctx, s_forecast_data[idx][1],
+                       strlen(s_forecast_data[idx][1]) >= 4 ? small_row_font : row_font, 
                        GRect(x_pos[2], y + 1, 40, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
     // Draw Wind Column (High Wind Warning Color)
     int wind_val = atoi(s_forecast_data[idx][2]);
     graphics_context_set_text_color(ctx, (wind_val >= (s_wind_unit == 1 ? 32 : s_wind_unit == 2 ? 9 : s_wind_unit == 3 ? 17 : 20)) ? GColorOrange : foreground);
-    graphics_draw_text(ctx, s_forecast_data[idx][2], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
+    graphics_draw_text(ctx, s_forecast_data[idx][2],
+                       strlen(s_forecast_data[idx][2]) >= 4 ? small_row_font : row_font, 
                        GRect(x_pos[3], y + 1, 38, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
     // Draw Rain Probability Pie Chart
@@ -372,7 +397,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
   // 7. Render Temporary Location Banner (Bottom of screen)
   if (s_show_banner) {
-    graphics_context_set_fill_color(ctx, GColorMidnightGreen);
+    graphics_context_set_fill_color(ctx, dark ? GColorDarkGray : GColorMidnightGreen);
     graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
     
     graphics_context_set_text_color(ctx, GColorWhite);
@@ -381,7 +406,8 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
   if (s_status[0]) {
-    graphics_context_set_fill_color(ctx, GColorMidnightGreen);
+    graphics_context_set_fill_color(ctx, s_status_error ? GColorRed :
+                                    (dark ? GColorDarkGray : GColorMidnightGreen));
     graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorWhite);
     graphics_draw_text(ctx, s_status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
@@ -703,7 +729,11 @@ static void init() {
   window_set_window_handlers(s_main_window, (WindowHandlers) { .load = main_window_load });
   window_stack_push(s_main_window, true);
   restore_persisted_forecast();
-  
+  if (!persist_exists(WEATHER_CONTROLS_HINT_KEY)) {
+    show_status("Hold SELECT to refresh");
+    persist_write_bool(WEATHER_CONTROLS_HINT_KEY, true);
+  }
+
   // Each message carries six hours; acknowledge validated chunks.
   app_message_register_inbox_received(inbox_received_callback);
   app_message_register_inbox_dropped(forecast_inbox_dropped);
