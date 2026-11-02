@@ -20,6 +20,9 @@ var transferBusy = false;
 var refreshQueued = false;
 var startupCacheFallback = false;
 var lastSentFingerprint = null;
+var lastLocation = null;
+var nextTransferId = (Date.now() % 2000000000);
+var lastSuccessfulTransfer = null;
 
 function scheduleRetry() {
   requestInProgress = false;
@@ -67,6 +70,31 @@ function sendThemeSetting() {
   msg[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
   Pebble.sendAppMessage(msg, null, function(e) { console.log('Theme update failed: ' + JSON.stringify(e)); });
 }
+// Each row uses 20 bytes: ASCII time[4], ASCII temperature[7],
+// wind and gust uint16 LE, precipitation and UV bytes (255=missing),
+// condition uint16 LE, and night flag. Much smaller than 8 dictionaries
+// containing separate per-hour strings/integers.
+function packForecastRows(hours, start, end) {
+  var bytes = [];
+  function ascii(value, width) {
+    var str = String(value);
+    for (var k = 0; k < width; k++) bytes.push(k < str.length ? str.charCodeAt(k) & 127 : 0);
+  }
+  function u16(value) {
+    var n = Math.max(0, Math.min(65535, Math.round(Number(value) || 0)));
+    bytes.push(n & 255, (n >> 8) & 255);
+  }
+  for (var i = start; i < end; i++) {
+    var h = hours[i];
+    ascii(h.time, 4); ascii(h.temp, 7);
+    u16(h.wind); u16(h.gust);
+    bytes.push(h.rain === '--' ? 255 : Math.max(0, Math.min(100, parseInt(h.rain, 10) || 0)));
+    bytes.push(h.uv == null || Number(h.uv) < 0 ? 255 : Math.max(0, Math.min(254, Number(h.uv))));
+    u16(h.cond);
+    bytes.push(h.night ? 1 : 0);
+  }
+  return bytes;
+}
 function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var settings=currentSettings(), units=setting(settings,keys.TEMP_UNIT,'TEMP_UNIT','F');
   var wind=windPreference(settings,units), count=Math.min(hours.length,48);
@@ -82,18 +110,12 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   first[keys.LOCATION_NAME]=location||'Current location';
   first[keys.GUSTS_ENABLED]=gustsEnabled?1:0;
   first[keys.FORECAST_COUNT]=count;
-  for(var i=0;i<count;i++){
-    var h=hours[i],t=chunks[Math.floor(i/6)];
-    t[keys.COLUMN_TIME+i]=h.time;
-    t[keys.COLUMN_TEMP+i]=h.temp;
-    t[keys.COLUMN_WIND+i]=h.wind;
-    t[keys.COLUMN_RAIN+i]=h.rain;
-    t[keys.COLUMN_UV+i]=h.uv;
-    t[keys.COLUMN_COND+i]=h.cond;
-    t[keys.IS_NIGHT+i]=h.night;
-    t[keys.COLUMN_GUST+i]=h.gust;
+  var transferId = ++nextTransferId;
+  for(var j=0;j<chunks.length;j++) {
+    chunks[j][keys.TRANSFER_PART]=j+1;
+    chunks[j][keys.TRANSFER_ID]=transferId;
+    chunks[j][keys.FORECAST_BLOB]=packForecastRows(hours,j*6,Math.min(count,(j+1)*6));
   }
-  for(var j=0;j<chunks.length;j++)chunks[j][keys.TRANSFER_PART]=j+1;
   chunks[0][keys.TRANSFER_COUNT]=count;
   sendWeatherChunks(chunks);
 }
@@ -218,7 +240,7 @@ function validHourlyRows(raw, now) {
   }
   return result;
 }
-function fetchWeather() {
+function fetchWeather(forceLocation) {
   if(requestInProgress){refreshQueued=true;return;}
   requestInProgress=true;
   var s=currentSettings();
@@ -265,7 +287,7 @@ function fetchWeather() {
         }
         completeForecast(formatted,label||name,timeFormat,tempUnit,windUnit,
           setting(s,keys.SHOW_GUSTS,'SHOW_GUSTS',false),sunrise,sunset);
-        showStatus('Updated: '+name);
+        console.log('Weather source: '+name);
       });
     }
     attempt(0);
@@ -285,8 +307,21 @@ function fetchWeather() {
         zip?query:(g.name||query));
     });
   }else{
-    navigator.geolocation.getCurrentPosition(function(p){run(p.coords.latitude,p.coords.longitude,'GPS Fix');},
-      function(){fail('GPS unavailable');},{timeout:12000,maximumAge:300000});
+    var nowMs = Date.now();
+    if (!forceLocation && lastLocation && nowMs-lastLocation.at < 3600000) {
+      console.log('Using cached GPS fix (' + Math.round((nowMs-lastLocation.at)/60000) + ' minutes old)');
+      run(lastLocation.lat,lastLocation.lon,'GPS Fix');
+    } else {
+      navigator.geolocation.getCurrentPosition(function(p) {
+        lastLocation={lat:p.coords.latitude,lon:p.coords.longitude,at:Date.now()};
+        run(lastLocation.lat,lastLocation.lon,'GPS Fix');
+      },function() {
+        if (lastLocation) {
+          console.log('GPS failed; using last known coordinates');
+          run(lastLocation.lat,lastLocation.lon,'GPS Fix');
+        } else fail('GPS unavailable');
+      },{timeout:12000,maximumAge:forceLocation?0:3600000,enableHighAccuracy:!!forceLocation});
+    }
   }
 }
 
@@ -345,6 +380,7 @@ function finishTransfer() {
 function sendTransferPart(index, attempt) {
   if (!activeTransfer) return;
   if (index >= activeTransfer.length) {
+    lastSuccessfulTransfer = activeTransfer[0][keys.TRANSFER_ID];
     console.log('Forecast transfer complete');
     finishTransfer();
     return;
@@ -381,8 +417,12 @@ function sendTransferPart(index, attempt) {
     } else { showStatus('Watch transfer failed'); finishTransfer(); }
   });
 }
-function acknowledgePart(part) {
+function acknowledgePart(part, transferId) {
   if (!activeTransfer) return;
+  if (transferId !== Number(activeTransfer[0][keys.TRANSFER_ID])) {
+    console.log('Ignoring ACK from old transaction ' + transferId);
+    return;
+  }
   if (part !== awaitingPart) {
     console.log('Ignoring stale/unexpected ACK ' + part + ', waiting for ' + awaitingPart);
     return;
@@ -419,8 +459,13 @@ Pebble.addEventListener('appmessage', function(e) {
   if (raw === undefined) raw = payload[String(keys.REFRESH_REQUEST)];
   if (raw === undefined || raw === null) return;
   var request = Number(raw);
-  if (request >= 101 && request <= 108) acknowledgePart(request - 100);
-  else if (request === 1) fetchWeather();
+  if (request >= 101 && request <= 108) {
+    var rawId = payload[keys.TRANSFER_ID];
+    if (rawId === undefined) rawId = payload.TRANSFER_ID;
+    if (rawId === undefined) rawId = payload[String(keys.TRANSFER_ID)];
+    acknowledgePart(request - 100, Number(rawId));
+  }
+  else if (request === 1) fetchWeather(true);
   else console.log('Unknown watch request: ' + request);
 });
 
