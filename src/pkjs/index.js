@@ -42,6 +42,9 @@ function sendCachedWeather() {
     var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
     var wind = windPreference(settings, units), time = settings[keys.TIME_FORMAT] || '12h';
     if (cache.units !== units || cache.windUnit !== wind || cache.timeFormat !== time) return false;
+    var locMode = settings[keys.LOCATION_MODE] || 'gps';
+    var locQuery = (settings[keys.LOCATION_QUERY] || '').trim();
+    if ((cache.locationMode || 'gps') !== locMode || (cache.locationQuery || '') !== locQuery) return false;
     var hours = cache.hours.filter(function(h) { return h.dt >= Math.floor(Date.now()/1000) - 3600; });
     if (!hours.length) { showStatus('Forecast expired'); return false; }
     transmitHours(hours, cache.location, cache.savedAt, true, cache.gustsEnabled);
@@ -52,6 +55,7 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var c1 = {}, c2 = {};
   var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
   var wind = windPreference(settings, units);
+  c1[keys.COLOR_MODE] = settings[keys.COLOR_MODE] || 'auto';
   c1[keys.UNITS] = units;
   c1[keys.WIND_UNIT] = wind;
   c1[keys.FORECAST_TIMESTAMP] = Math.floor(savedAt / 1000);
@@ -93,9 +97,7 @@ function fetchWeather() {
   if (!apiKey) { requestInProgress = false; showStatus('Set API key in settings'); return; }
 
   // 2. Request current GPS coordinates from the phone OS
-  navigator.geolocation.getCurrentPosition(function(pos) {
-    var lat = pos.coords.latitude;
-    var lon = pos.coords.longitude;
+  function weatherAt(lat, lon, manualLabel) {
 
     // Build the OpenWeather 3.0 One Call URL
     var url = 'https://api.openweathermap.org/data/3.0/onecall?lat=' + 
@@ -158,7 +160,7 @@ function fetchWeather() {
         // ==============================================================================
         
         // Primary fallback: Extract city from generic timezone string (e.g., "America/New_York")
-        var fallbackName = "GPS Fix";
+        var fallbackName = manualLabel || "GPS Fix";
         if (json.timezone) {
           var tzParts = json.timezone.split('/');
           if (tzParts.length > 1) {
@@ -166,6 +168,7 @@ function fetchWeather() {
           }
         }
 
+        if (manualLabel) { completeForecast(hoursData, manualLabel, timeFormat, unitType, windUnit, gustsEnabled); return; }
         // Attempt secondary API call for precise local city name
         var geoUrl = 'https://api.openweathermap.org/geo/1.0/reverse?lat=' + lat + '&lon=' + lon + '&limit=1&appid=' + apiKey;
         var geoXhr = new XMLHttpRequest();
@@ -199,7 +202,33 @@ function fetchWeather() {
     xhr.timeout = 15000;
     xhr.open('GET', url);
     xhr.send();
-  }, function(error) { console.log('GPS error: ' + error.message); requestInProgress = false; showStatus('Location unavailable'); sendCachedWeather(); scheduleRetry(); }, {timeout: 12000, maximumAge: 300000});
+  }
+  var locationMode = settings[keys.LOCATION_MODE] || 'gps';
+  var locationQuery = (settings[keys.LOCATION_QUERY] || '').trim();
+  if (locationMode === 'manual') {
+    if (!locationQuery) { requestInProgress = false; showStatus('Enter ZIP or city'); return; }
+    var geocodeUrl = /^\\d{5}$/.test(locationQuery) ?
+      'https://api.openweathermap.org/geo/1.0/zip?zip=' + encodeURIComponent(locationQuery + ',US') + '&appid=' + apiKey :
+      'https://api.openweathermap.org/geo/1.0/direct?q=' + encodeURIComponent(locationQuery) + '&limit=1&appid=' + apiKey;
+    var geo = new XMLHttpRequest();
+    geo.onload = function() {
+      try {
+        if (geo.status !== 200) throw new Error('Geocoding HTTP ' + geo.status);
+        var result = JSON.parse(geo.responseText);
+        var place = Array.isArray(result) ? result[0] : result;
+        if (!place || typeof place.lat !== 'number' || typeof place.lon !== 'number') throw new Error('Location not found');
+        weatherAt(place.lat, place.lon, place.name || locationQuery);
+      } catch(e) { console.log(e.message); showStatus('Location not found'); scheduleRetry(); }
+    };
+    geo.onerror = geo.ontimeout = function() { showStatus('Location lookup failed'); scheduleRetry(); };
+    geo.timeout = 12000;
+    geo.open('GET', geocodeUrl);
+    geo.send();
+  } else {
+    navigator.geolocation.getCurrentPosition(function(pos) { weatherAt(pos.coords.latitude, pos.coords.longitude, null); },
+      function(error) { console.log('GPS error: ' + error.message); requestInProgress = false; showStatus('Location unavailable'); sendCachedWeather(); scheduleRetry(); },
+      {timeout: 12000, maximumAge: 300000});
+  }
 }
 
 // ==============================================================================
@@ -212,7 +241,7 @@ function completeForecast(hours, location, timeFormat, units, windUnit, gustsEna
   retryCount = 0;
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   var savedAt = Date.now();
-  localStorage.setItem('lastForecast', JSON.stringify({hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, savedAt:savedAt}));
+  localStorage.setItem('lastForecast', JSON.stringify({hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:currentSettings()[keys.LOCATION_MODE] || 'gps', locationQuery:(currentSettings()[keys.LOCATION_QUERY] || '').trim(), savedAt:savedAt}));
   transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
 function sendWeatherChunks(c1, c2, attempt) {
