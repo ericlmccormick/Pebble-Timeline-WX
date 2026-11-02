@@ -25,6 +25,8 @@ static int s_selected_hour = 0;
 static char s_pending_location[32] = "";
 static char s_status[48] = "";
 static AppTimer *s_status_timer = NULL;
+static int s_color_mode = 0; // 0=auto, 1=day, 2=night
+static int s_pending_color_mode = 0;
 static int s_wind_unit = 0; // 0=mph, 1=km/h, 2=m/s, 3=knots
 static bool s_is_metric = false;        // Tracks user preference for Celsius/kmh vs Fahrenheit/mph
 
@@ -202,8 +204,16 @@ static void click_config_provider(void *context) {
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer); // Get screen dimensions
 
-  // 1. Draw solid white background
-  graphics_context_set_fill_color(ctx, GColorWhite);
+  // Automatic appearance follows the watch local clock, not the forecast location.
+  time_t now = time(NULL);
+  struct tm *local = localtime(&now);
+  bool dark = s_color_mode == 2 || (s_color_mode == 0 && local && (local->tm_hour < 7 || local->tm_hour >= 19));
+  GColor foreground = dark ? GColorWhite : GColorBlack;
+  GColor background = dark ? GColorBlack : GColorWhite;
+  GColor header_color = dark ? GColorDarkGray : GColorLightGray;
+  GColor separator_color = dark ? GColorDarkGray : GColorLightGray;
+  // 1. Draw appearance-dependent background
+  graphics_context_set_fill_color(ctx, background);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   // 2. Define headers and column spacing
@@ -215,11 +225,11 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   int x_pos[] = {5, 42, 85, 122, 166}; // X-coordinates for each column
 
   // 3. Draw Header Background Bar
-  graphics_context_set_fill_color(ctx, GColorLightGray);
+  graphics_context_set_fill_color(ctx, header_color);
   graphics_fill_rect(ctx, GRect(0, 0, bounds.size.w, 24), 0, GCornerNone);
 
   // 4. Draw Header Text
-  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_context_set_text_color(ctx, foreground);
   for(int i = 0; i < 5; i++) {
     graphics_draw_text(ctx, headers[i], fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), 
                        GRect(x_pos[i], 0, i == 3 ? 38 : 42, 24), GTextOverflowModeTrailingEllipsis, i == 3 ? GTextAlignmentCenter : GTextAlignmentLeft, NULL);
@@ -245,7 +255,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     }
 
     // Draw row separator line
-    graphics_context_set_stroke_color(ctx, GColorLightGray);
+    graphics_context_set_stroke_color(ctx, separator_color);
     graphics_draw_line(ctx, GPoint(0, y - 2), GPoint(bounds.size.w - 12, y - 2));
 
     // Draw Time Column
@@ -261,7 +271,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
     // Draw Temperature Column (Semantic High/Low Colors)
     int temp_val = atoi(s_forecast_data[idx][1]);
-    GColor temp_color = GColorBlack;
+    GColor temp_color = foreground;
     if (!s_is_metric) { // Fahrenheit logic
       if (temp_val >= 90) temp_color = GColorRed;
       else if (temp_val <= 32) temp_color = GColorBlue;
@@ -275,7 +285,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
     // Draw Wind Column (High Wind Warning Color)
     int wind_val = atoi(s_forecast_data[idx][2]);
-    graphics_context_set_text_color(ctx, (wind_val >= (s_wind_unit == 1 ? 32 : s_wind_unit == 2 ? 9 : s_wind_unit == 3 ? 17 : 20)) ? GColorOrange : GColorBlack);
+    graphics_context_set_text_color(ctx, (wind_val >= (s_wind_unit == 1 ? 32 : s_wind_unit == 2 ? 9 : s_wind_unit == 3 ? 17 : 20)) ? GColorOrange : foreground);
     graphics_draw_text(ctx, s_forecast_data[idx][2], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
                        GRect(x_pos[3], y + 1, 38, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
@@ -284,7 +294,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     GRect rain_rect = GRect(x_pos[4], y + 5, 22, 22); // Bounding box for the circle
     
     // Draw the empty background ring
-    graphics_context_set_stroke_color(ctx, GColorDarkGray);
+    graphics_context_set_stroke_color(ctx, dark ? GColorLightGray : GColorDarkGray);
     graphics_draw_arc(ctx, rain_rect, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
     
     if (rain_val > 0) {
@@ -306,12 +316,12 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   }
 
   // 6. Draw Scroll Track Indicator
-  graphics_context_set_fill_color(ctx, GColorLightGray); // Track background
+  graphics_context_set_fill_color(ctx, separator_color); // Track background
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, 24, 2, bounds.size.h - 24 - bottom_margin), 0, GCornerNone);
   
   // Calculate relative handle position based on offset
   int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 18);
-  graphics_context_set_fill_color(ctx, GColorDarkGray);  // Moving handle
+  graphics_context_set_fill_color(ctx, dark ? GColorWhite : GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
   // 7. Render Temporary Location Banner (Bottom of screen)
@@ -359,6 +369,10 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   while (t) {
     uint32_t key = t->key;
     if (key == MESSAGE_KEY_LOCATION_NAME) snprintf(s_pending_location, sizeof(s_pending_location), "%s", t->value->cstring);
+    else if (key == MESSAGE_KEY_COLOR_MODE) {
+      const char *mode = t->value->cstring;
+      s_pending_color_mode = strcmp(mode, "day") == 0 ? 1 : strcmp(mode, "night") == 0 ? 2 : 0;
+    }
     else if (key == MESSAGE_KEY_UNITS) s_pending_metric = strcmp(t->value->cstring, "metric") == 0;
     else if (key == MESSAGE_KEY_WIND_UNIT) {
       const char *unit = t->value->cstring;
@@ -393,6 +407,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_forecast_count = s_pending_count;
     s_is_metric = s_pending_metric;
     s_wind_unit = s_pending_wind_unit;
+    s_color_mode = s_pending_color_mode;
     s_gust_enabled = s_pending_gust_enabled;
     s_forecast_timestamp = s_pending_timestamp;
     s_cached = s_pending_cached;
