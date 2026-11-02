@@ -20,7 +20,10 @@ module.exports = [
       {label:'12 hour',value:'12h'},{label:'24 hour',value:'24h'}]},
     {type:'select',messageKey:'COLOR_MODE',label:'Appearance',defaultValue:'auto',options:[
       {label:'Auto (sunrise/sunset)',value:'auto'},{label:'Day',value:'day'},{label:'Night',value:'night'}]},
-    {type:'toggle',messageKey:'SHOW_GUSTS',label:'Show gusts on select',defaultValue:false}
+    {type:'toggle',messageKey:'SHOW_GUSTS',label:'Show gusts on select',defaultValue:false},
+    {type:'select',messageKey:'MESSAGE_POLICY',label:'Notifications',defaultValue:'all',options:[
+      {label:'All messages',value:'all'},
+      {label:'Critical only',value:'critical'}]}
   ]},
   {type:'section',items:[
     {type:'heading',defaultValue:'Location'},
