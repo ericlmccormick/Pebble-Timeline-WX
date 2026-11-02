@@ -18,10 +18,12 @@ var requestInProgress = false;
 var transferQueue = [];
 var transferBusy = false;
 var refreshQueued = false;
+var startupCacheFallback = false;
+var lastSentFingerprint = null;
 
 function scheduleRetry() {
   requestInProgress = false;
-  if (retryCount >= MAX_RETRIES) { showStatus('Update failed - old data'); return; }
+  if (retryCount >= MAX_RETRIES) { if (startupCacheFallback) { startupCacheFallback = false; sendCachedWeather(); } showStatus('Update failed - old data'); return; }
   retryCount++;
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = setTimeout(fetchWeather, Math.min(60000 * Math.pow(2, retryCount - 1), 240000));
@@ -103,13 +105,14 @@ function wmoCode(c) {
   if(c>=95)return 200;return 803;
 }
 function textCode(t) {
-  t=String(t||'').toLowerCase();
+  t=String(t||'').toLowerCase().replace(/_/g,' ');
   if(t.indexOf('thunder')>=0)return 200;
   if(t.indexOf('snow')>=0||t.indexOf('sleet')>=0)return 601;
   if(t.indexOf('rain')>=0||t.indexOf('shower')>=0)return 501;
   if(t.indexOf('fog')>=0)return 701;
   if(t.indexOf('clear')>=0||t.indexOf('sunny')>=0||t.indexOf('fair')>=0)return 800;
-  if(t.indexOf('partly')>=0)return 801;return 803;
+  if(t.indexOf('partly')>=0||t.indexOf('fair')>=0)return 801;
+  if(t.indexOf('cloud')>=0)return 803;return 803;
 }
 function httpJson(url, done, headers) {
   var xhr=new XMLHttpRequest();
@@ -134,7 +137,7 @@ function providerData(name,lat,lon,apiKey,done) {
         try {
           var a=r.hourly, rows=[];
           for(var i=0;i<a.time.length;i++)rows.push({dt:a.time[i],temp:a.temperature_2m[i],
-            wind:a.wind_speed_10m[i],gust:a.wind_gusts_10m[i],pop:a.precipitation_probability[i]/100,
+            wind:a.wind_speed_10m[i],gust:a.wind_gusts_10m[i],pop:a.precipitation_probability[i]==null?null:a.precipitation_probability[i]/100,
             uv:a.uv_index[i],cond:wmoCode(a.weather_code[i]),night:a.is_day[i]===0?1:0});
           done(null,{rows:rows,sunrise:r.daily&&r.daily.sunrise,sunset:r.daily&&r.daily.sunset});
         }catch(e){done(e);}
@@ -164,7 +167,7 @@ function providerData(name,lat,lon,apiKey,done) {
           var wind=parseFloat(p.windSpeed)||0;
           var mps=/km\/h|kph/i.test(p.windSpeed)?wind/3.6:wind*0.44704;
           return {dt:Date.parse(p.startTime)/1000,temp:p.temperatureUnit==='F'?(p.temperature-32)*5/9:p.temperature,
-            wind:mps,gust:mps,pop:p.probabilityOfPrecipitation&&p.probabilityOfPrecipitation.value!=null?
+            wind:mps,gust:null,pop:p.probabilityOfPrecipitation&&p.probabilityOfPrecipitation.value!=null?
             p.probabilityOfPrecipitation.value/100:null,uv:null,cond:textCode(p.shortForecast),
             night:p.isDaytime?0:1};
         })});}catch(e){done(e);}
@@ -187,6 +190,33 @@ function providerData(name,lat,lon,apiKey,done) {
         })});}catch(e){done(e);}
       },{'User-Agent':'TimelineWX/1.0 (https://github.com/ericlmccormick/Pebble_Hourly_Weather)'});
   }
+}
+// All provider rows are normalized to SI units and a common time grid.
+function validHourlyRows(raw, now) {
+  if (!Array.isArray(raw)) return [];
+  var seen = {}, rows = [];
+  raw.forEach(function(h) {
+    if (!h || !isFinite(h.dt) || !isFinite(h.temp) || !isFinite(h.wind) ||
+        !isFinite(h.cond) || !isFinite(h.night)) return;
+    if (h.dt < now - 3600 || h.dt >= now + 49 * 3600) return;
+    var hour = Math.round(h.dt / 3600);
+    if (Math.abs(h.dt - hour * 3600) > 1800 || seen[hour]) return;
+    if (h.temp < -110 || h.temp > 65 || h.wind < 0 || h.wind > 150) return;
+    var row = {dt:h.dt,temp:Number(h.temp),wind:Number(h.wind),
+      gust:h.gust==null||!isFinite(h.gust)||h.gust<0?null:Number(h.gust),
+      pop:h.pop==null||!isFinite(h.pop)?null:Math.max(0,Math.min(1,Number(h.pop))),
+      uv:h.uv==null||!isFinite(h.uv)?null:Math.max(0,Number(h.uv)),
+      cond:Number(h.cond),night:Number(h.night)?1:0};
+    seen[hour] = true;
+    rows.push(row);
+  });
+  rows.sort(function(a,b){return a.dt-b.dt;});
+  var result = [];
+  for (var i=0;i<rows.length && result.length<48;i++) {
+    if (result.length && Math.abs(rows[i].dt-result[result.length-1].dt-3600)>300) break;
+    result.push(rows[i]);
+  }
+  return result;
 }
 function fetchWeather() {
   if(requestInProgress){refreshQueued=true;return;}
@@ -211,8 +241,8 @@ function fetchWeather() {
       providerData(name,lat,lon,apiKey,function(err,data) {
         if(err){console.log(name+': '+err);if(provider==='auto')attempt(i+1);else fail(name+' failed: '+err.message);return;}
         var now=Math.floor(Date.now()/1000);
-        var rows=data.rows.filter(function(h){return h.dt>=now-3600&&h.dt<now+49*3600;}).slice(0,48);
-        if(rows.length<6){if(provider==='auto')attempt(i+1);else fail('Incomplete '+name+' forecast');return;}
+        var rows=validHourlyRows(data.rows,now);
+        if(rows.length<48){if(provider==='auto')attempt(i+1);else fail('Incomplete '+name+' forecast');return;}
         var formatted=rows.map(function(h){
           var hr=new Date(h.dt*1000).getHours();
           var t=timeFormat==='24h'?(hr<10?'0':'')+hr:(hr%12||12)+(hr>=12?'p':'a');
@@ -226,7 +256,7 @@ function fetchWeather() {
           return {dt:h.dt,time:String(t),temp:String(Math.round(v))+(tempUnit==='F'?'°':tempUnit),
             wind:String(Math.round(ws)),gust:String(Math.round(gust)),
             rain:h.pop==null?'--':String(Math.round(h.pop*100))+'%',
-            uv:h.uv==null?0:Math.round(h.uv),cond:h.cond,night:h.night};
+            uv:h.uv==null?-1:Math.round(h.uv),cond:h.cond,night:h.night};
         });
         var sunrise=data.sunrise,sunset=data.sunset;
         if(Array.isArray(sunrise)){
@@ -268,12 +298,16 @@ function fetchWeather() {
 function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled, sunrise, sunset) {
   requestInProgress = false;
   retryCount = 0;
+  startupCacheFallback = false;
   if (refreshQueued) { refreshQueued = false; setTimeout(fetchWeather, 100); }
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   var savedAt = Date.now();
   hours.sunrise = sunrise;
   hours.sunset = sunset;
   localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:setting(currentSettings(), keys.LOCATION_MODE, 'LOCATION_MODE', 'gps'), locationQuery:String(setting(currentSettings(), keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim(), savedAt:savedAt}));
+  var fingerprint = JSON.stringify({hours:hours,location:location,units:units,windUnit:windUnit,gustsEnabled:gustsEnabled,sunrise:sunrise,sunset:sunset});
+  if (fingerprint === lastSentFingerprint) { console.log('Forecast unchanged; skipping Bluetooth transfer'); return; }
+  lastSentFingerprint = fingerprint;
   transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
 // Serialize whole forecast transactions. Interleaved cached/live transfers
@@ -367,7 +401,8 @@ function acknowledgePart(part) {
 // Triggers immediately when the watch app boots up
 Pebble.addEventListener('ready', function() {
   sendThemeSetting();
-  sendCachedWeather();
+  // Fetch fresh data first. Only send the cached forecast if refresh ultimately fails.
+  startupCacheFallback = true;
   fetchWeather();
   var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
   REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
