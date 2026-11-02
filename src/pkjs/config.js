@@ -15,6 +15,17 @@ module.exports = [
       },
       {
         "type": "radiogroup",
+        "messageKey": "WIND_UNIT",
+        "label": "Wind Speed",
+        "options": [
+          { "label": "Miles per hour (mph)", "value": "mph" },
+          { "label": "Kilometers per hour (km/h)", "value": "kmh" },
+          { "label": "Meters per second (m/s)", "value": "ms" },
+          { "label": "Knots (kt)", "value": "knots" }
+        ]
+      },
+      {
+        "type": "radiogroup",
         "messageKey": "TIME_FORMAT", // <-- Make sure this is here
         "label": "Time Format",
         "options": [
