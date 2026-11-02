@@ -184,16 +184,18 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   // Determine how many rows to draw based on banner visibility (to prevent overlapping)
   int visible_rows = s_show_banner ? 5 : 6;
   int bottom_margin = s_show_banner ? 20 : 0; // Reserves 20px at the bottom if banner is active
+  const int grid_height = bounds.size.h - 24 - bottom_margin;
+  const int row_height = grid_height / visible_rows;
 
   // 5. Draw the Data Grid
   for(int i = 0; i < visible_rows; i++) {
     int idx = i + s_scroll_offset;    // The actual data array index based on scroll position
-    int y = 24 + (i * 32);            // The vertical pixel coordinate for the current row
+    int y = 24 + (i * grid_height) / visible_rows; // Distribute rows evenly to the bottom
     
     // Feature: Highlight the "Current Hour" (Row 0) with a blue indicator on the left
     if (idx == 0 && !s_show_banner) {
       graphics_context_set_fill_color(ctx, GColorPictonBlue);
-      graphics_fill_rect(ctx, GRect(0, y, 3, 30), 0, GCornerNone);
+      graphics_fill_rect(ctx, GRect(0, y, 3, row_height - 2), 0, GCornerNone);
     }
 
     // Draw row separator line
@@ -254,7 +256,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     if(uv > 7) uv_color = GColorRed;
     if(uv > 10) uv_color = GColorPurple;
     graphics_context_set_fill_color(ctx, uv_color);
-    graphics_fill_rect(ctx, GRect(bounds.size.w - 10, y + 1, 8, 30), 2, GCornersAll); // 8px wide, 2px rounded corners
+    graphics_fill_rect(ctx, GRect(bounds.size.w - 10, y + 1, 8, row_height - 2), 2, GCornersAll); // 8px wide, 2px rounded corners
   }
 
   // 6. Draw Scroll Track Indicator
