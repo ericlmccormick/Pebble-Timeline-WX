@@ -21,6 +21,7 @@ var refreshQueued = false;
 var startupCacheFallback = false;
 var lastSentFingerprint = null;
 var lastLocation = null;
+try { lastLocation = JSON.parse(localStorage.getItem('lastWeatherLocation')); } catch (e) { lastLocation = null; }
 var nextTransferId = (Date.now() % 2000000000);
 var lastSuccessfulTransfer = null;
 
@@ -308,12 +309,13 @@ function fetchWeather(forceLocation) {
     });
   }else{
     var nowMs = Date.now();
-    if (!forceLocation && lastLocation && nowMs-lastLocation.at < 3600000) {
+    if (!forceLocation && lastLocation && isFinite(lastLocation.lat) && isFinite(lastLocation.lon) && isFinite(lastLocation.at) && nowMs-lastLocation.at >= 0 && nowMs-lastLocation.at < 3600000) {
       console.log('Using cached GPS fix (' + Math.round((nowMs-lastLocation.at)/60000) + ' minutes old)');
       run(lastLocation.lat,lastLocation.lon,'GPS Fix');
     } else {
       navigator.geolocation.getCurrentPosition(function(p) {
         lastLocation={lat:p.coords.latitude,lon:p.coords.longitude,at:Date.now()};
+        try { localStorage.setItem('lastWeatherLocation', JSON.stringify(lastLocation)); } catch (e) {}
         run(lastLocation.lat,lastLocation.lon,'GPS Fix');
       },function() {
         if (lastLocation) {
