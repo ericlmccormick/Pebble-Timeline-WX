@@ -293,7 +293,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_line(ctx, GPoint(0, y - 2), GPoint(bounds.size.w - 12, y - 2));
 
     // Draw Time Column
-    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_context_set_text_color(ctx, foreground);
     graphics_draw_text(ctx, s_forecast_data[idx][0], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
                        GRect(x_pos[0], y + 1, 35, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     
