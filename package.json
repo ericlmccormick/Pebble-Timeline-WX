@@ -25,7 +25,8 @@
             "TIME_FORMAT",
             "IS_NIGHT[24]",
             "LOCATION_NAME",
-            "REFRESH_REQUEST"
+            "REFRESH_REQUEST",
+            "WIND_UNIT"
         ],
         "projectType": "native",
         "resources": {
