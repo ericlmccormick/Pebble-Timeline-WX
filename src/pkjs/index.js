@@ -32,6 +32,9 @@ function showStatus(message) {
 function currentSettings() {
   try { return JSON.parse(localStorage.getItem('clay-settings')) || {}; } catch(e) { return {}; }
 }
+function setting(settings, key, name, fallback) {
+  return settings[key] !== undefined ? settings[key] : (settings[name] !== undefined ? settings[name] : fallback);
+}
 function windPreference(settings, units) {
   return settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (units === 'metric' ? 'kmh' : 'mph');
 }
@@ -42,8 +45,8 @@ function sendCachedWeather() {
     var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
     var wind = windPreference(settings, units), time = settings[keys.TIME_FORMAT] || '12h';
     if (cache.units !== units || cache.windUnit !== wind || cache.timeFormat !== time) return false;
-    var locMode = settings[keys.LOCATION_MODE] || 'gps';
-    var locQuery = (settings[keys.LOCATION_QUERY] || '').trim();
+    var locMode = setting(settings, keys.LOCATION_MODE, 'LOCATION_MODE', 'gps');
+    var locQuery = String(setting(settings, keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim();
     if ((cache.locationMode || 'gps') !== locMode || (cache.locationQuery || '') !== locQuery) return false;
     var hours = cache.hours.filter(function(h) { return h.dt >= Math.floor(Date.now()/1000) - 3600; });
     if (!hours.length) { showStatus('Forecast expired'); return false; }
@@ -57,7 +60,7 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var c1 = {}, c2 = {};
   var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
   var wind = windPreference(settings, units);
-  c1[keys.COLOR_MODE] = settings[keys.COLOR_MODE] || 'auto';
+  c1[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
   if (hours.sunrise && hours.sunset) { c1[keys.SUNRISE] = hours.sunrise; c1[keys.SUNSET] = hours.sunset; }
   c1[keys.UNITS] = units;
   c1[keys.WIND_UNIT] = wind;
@@ -209,8 +212,8 @@ function fetchWeather() {
     xhr.open('GET', url);
     xhr.send();
   }
-  var locationMode = settings[keys.LOCATION_MODE] || 'gps';
-  var locationQuery = (settings[keys.LOCATION_QUERY] || '').trim();
+  var locationMode = setting(settings, keys.LOCATION_MODE, 'LOCATION_MODE', 'gps');
+  var locationQuery = String(setting(settings, keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim();
   if (locationMode === 'manual') {
     if (!locationQuery) { requestInProgress = false; showStatus('Enter ZIP or city'); return; }
     var geocodeUrl = /^\\d{5}$/.test(locationQuery) ?
@@ -249,7 +252,7 @@ function completeForecast(hours, location, timeFormat, units, windUnit, gustsEna
   var savedAt = Date.now();
   hours.sunrise = sunrise;
   hours.sunset = sunset;
-  localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:currentSettings()[keys.LOCATION_MODE] || 'gps', locationQuery:(currentSettings()[keys.LOCATION_QUERY] || '').trim(), savedAt:savedAt}));
+  localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:setting(currentSettings(), keys.LOCATION_MODE, 'LOCATION_MODE', 'gps'), locationQuery:String(setting(currentSettings(), keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim(), savedAt:savedAt}));
   transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
 function sendWeatherChunks(c1, c2, attempt) {
@@ -281,5 +284,5 @@ Pebble.addEventListener('appmessage', function(e) {
 
 // Triggers when the user closes the Clay Settings menu on their phone
 Pebble.addEventListener('webviewclosed', function(e) {
-  if (e && e.response) { retryCount = 0; fetchWeather(); } // Refresh data with new user settings
+  if (e && e.response) { retryCount = 0; sendCachedWeather(); fetchWeather(); } // Refresh data with new user settings
 });
