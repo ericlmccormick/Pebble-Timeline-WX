@@ -13,7 +13,8 @@ static char s_forecast_data[48][4][10]; // Stores text data: [Hour][Data Type][S
 static int s_uv_values[48];             // Stores the raw UV index integers
 static int s_is_night[48];              // Boolean flag (1 or 0) for day/night icon selection
 static int s_conditions[48];            // OpenWeather condition ID codes (e.g., 500 = light rain)
-static GBitmap *s_icon_bitmaps[48];     // Pointers to the loaded image assets in memory
+static GBitmap *s_icon_bitmaps[48];     // Shared pointers for icons on visible rows
+static uint32_t s_icon_resource_ids[48]; // Resource identity for safe bitmap sharing
 static char s_pending_data[48][4][10];
 static int s_pending_uv[48], s_pending_night[48], s_pending_conditions[48], s_pending_gust[48];
 static int s_gust[48], s_forecast_count = 0, s_pending_count = 0;
@@ -51,10 +52,14 @@ static AppTimer *s_banner_timer = NULL;                    // Timer handle for a
 
 // Loads only the icons currently visible on the screen to prevent RAM overflow
 static void invalidate_icon(int idx) {
-  if (s_icon_bitmaps[idx]) {
-    gbitmap_destroy(s_icon_bitmaps[idx]);
-    s_icon_bitmaps[idx] = NULL;
+  GBitmap *bitmap = s_icon_bitmaps[idx];
+  if (!bitmap) return;
+  s_icon_bitmaps[idx] = NULL;
+  s_icon_resource_ids[idx] = 0;
+  for (int i = 0; i < 48; i++) {
+    if (s_icon_bitmaps[i] == bitmap) return; // Another row still uses it.
   }
+  gbitmap_destroy(bitmap);
 }
 static void update_icons_for_view() {
   for(int i = 0; i < 48; i++) {
@@ -107,14 +112,18 @@ static void update_icons_for_view() {
         }
 
         // Allocate memory and create the bitmap
-        s_icon_bitmaps[i] = gbitmap_create_with_resource(res_id);
+        s_icon_resource_ids[i] = res_id;
+        for (int j = 0; j < 48; j++) {
+          if (s_icon_bitmaps[j] && s_icon_resource_ids[j] == res_id) {
+            s_icon_bitmaps[i] = s_icon_bitmaps[j];
+            break;
+          }
+        }
+        if (!s_icon_bitmaps[i]) s_icon_bitmaps[i] = gbitmap_create_with_resource(res_id);
       }
     } else {
       // If the row is off-screen, destroy the bitmap to free up RAM
-      if (s_icon_bitmaps[i]) {
-        gbitmap_destroy(s_icon_bitmaps[i]);
-        s_icon_bitmaps[i] = NULL;
-      }
+      invalidate_icon(i);
     }
   }
 }
@@ -722,7 +731,7 @@ static void deinit() {
   if (s_banner_timer) app_timer_cancel(s_banner_timer); // Clear lingering timers
   if (s_status_timer) app_timer_cancel(s_status_timer);
   for(int i = 0; i < 48; i++) { 
-    if(s_icon_bitmaps[i]) gbitmap_destroy(s_icon_bitmaps[i]); // Free graphic RAM
+    invalidate_icon(i); // Free shared bitmaps only after their last reference
   }
   layer_destroy(s_canvas_layer);
   window_destroy(s_main_window);
