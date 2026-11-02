@@ -45,8 +45,8 @@ function sendCachedWeather() {
   try {
     var cache = JSON.parse(localStorage.getItem('lastForecast'));
     if (!cache || !cache.hours || !cache.savedAt) return false;
-    var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
-    var wind = windPreference(settings, units), time = settings[keys.TIME_FORMAT] || '12h';
+    var settings = currentSettings(), units = setting(settings, keys.TEMP_UNIT, 'TEMP_UNIT', null) || (setting(settings, keys.UNITS, 'UNITS', 'imperial')==='metric'?'C':'F');
+    var wind = windPreference(settings, units), time = setting(settings, keys.TIME_FORMAT, 'TIME_FORMAT', '12h');
     if (cache.units !== units || cache.windUnit !== wind || cache.timeFormat !== time) return false;
     var locMode = setting(settings, keys.LOCATION_MODE, 'LOCATION_MODE', 'gps');
     var locQuery = String(setting(settings, keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim();
@@ -67,11 +67,11 @@ function sendThemeSetting() {
 }
 function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var c1 = {}, c2 = {};
-  var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
+  var settings = currentSettings(), units = setting(settings, keys.TEMP_UNIT, 'TEMP_UNIT', 'F');
   var wind = windPreference(settings, units);
   c1[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
   if (hours.sunrise && hours.sunset) { c1[keys.SUNRISE] = hours.sunrise; c1[keys.SUNSET] = hours.sunset; }
-  c1[keys.UNITS] = units;
+  c1[keys.UNITS] = units === 'C' ? 'metric' : 'imperial';
   c1[keys.WIND_UNIT] = wind;
   c1[keys.FORECAST_TIMESTAMP] = Math.floor(savedAt / 1000);
   c1[keys.FORECAST_CACHED] = cached ? 1 : 0;
@@ -96,156 +96,170 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   c2[keys.TRANSFER_COUNT] = count;
   sendWeatherChunks(c1, c2);
 }
-function fetchWeather() {
-  if (requestInProgress) { refreshQueued = true; showStatus('Refresh queued'); return; }
-  requestInProgress = true;
-  // 1. Retrieve user preferences from local phone storage
-  var settings = {};
-  try { settings = JSON.parse(localStorage.getItem('clay-settings')) || {}; } catch (e) { console.log('Invalid settings'); }
-  var apiKey = settings[keys.API_KEY] || settings['API_KEY'];
-  var unitType = settings[keys.UNITS] || 'imperial';
-  var timeFormat = settings[keys.TIME_FORMAT] || '12h';
-  // Wind speed is independent of the temperature unit preference.
-  var windUnit = settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (unitType === 'metric' ? 'kmh' : 'mph');
-  if (['mph', 'kmh', 'ms', 'knots'].indexOf(windUnit) < 0) windUnit = 'mph';
-
-  if (!apiKey) { requestInProgress = false; showStatus('Set API key in settings'); return; }
-
-  // 2. Request current GPS coordinates from the phone OS
-  function weatherAt(lat, lon, manualLabel) {
-
-    // Build the OpenWeather 3.0 One Call URL
-    var url = 'https://api.openweathermap.org/data/3.0/onecall?lat=' + 
-              lat + '&lon=' + lon + '&exclude=minutely,daily&units=' + unitType + '&appid=' + apiKey;
-
-    var xhr = new XMLHttpRequest();
-    xhr.onload = function () {
-      if (this.status === 200) {
-        var json;
-        try { json = JSON.parse(this.responseText); } catch (e) { console.log('Invalid weather JSON'); scheduleRetry(); return; }
-        var tempSuffix = (unitType === 'metric') ? "C" : "°";
-        if (!json.hourly || json.hourly.length < 24) { console.log('Incomplete hourly forecast'); scheduleRetry(); return; }
-        
-        // Prepare two separate dictionaries to prevent Bluetooth MTU overflow
-        var hoursData = [];
-        // Unix UTC timestamps from the forecast location, not phone clock.
-        var sunrise = json.current && json.current.sunrise;
-        var sunset = json.current && json.current.sunset;
-        var gustsEnabled = settings[keys.SHOW_GUSTS] === true || settings[keys.SHOW_GUSTS] === 'true' || settings[keys.SHOW_GUSTS] === 1;
-
-        // 3. Process the next 24 hours of forecast data
-        for(var i = 0; i < 24; i++) {
-          var h = json.hourly[i];
-          var date = new Date(h.dt * 1000);
-          var hours = date.getHours();
-          var timeStr = "";
-
-          // Time formatting logic (12h vs 24h)
-          if (timeFormat === '12h') {
-            var ampm = hours >= 12 ? 'p' : 'a';
-            hours = hours % 12 || 12;
-            timeStr = hours + ampm;
-          } else {
-            timeStr = (hours < 10 ? '0' + hours : hours).toString();
-          }
-
-          // Determine which transmission chunk this hour belongs to
-          var target = {};
-          
-          // Populate the specific key-value pairs utilizing index offsets
-          target[keys.COLUMN_TIME + i] = timeStr;
-          target[keys.COLUMN_TEMP + i] = Math.round(h.temp) + tempSuffix;
-          // OpenWeather reports wind in mph for imperial and m/s for metric.
-          var windMs = unitType === 'metric' ? h.wind_speed : h.wind_speed * 0.44704;
-          var convertedWind = windUnit === 'ms' ? windMs :
-                              windUnit === 'kmh' ? windMs * 3.6 :
-                              windUnit === 'knots' ? windMs * 1.94384449 : windMs * 2.23693629;
-          target[keys.COLUMN_WIND + i] = Math.round(convertedWind).toString();
-          var gustMs = unitType === 'metric' ? (h.wind_gust || h.wind_speed) : (h.wind_gust || h.wind_speed) * 0.44704;
-          var gust = windUnit === 'ms' ? gustMs : windUnit === 'kmh' ? gustMs * 3.6 : windUnit === 'knots' ? gustMs * 1.94384449 : gustMs * 2.23693629;
-          target[keys.COLUMN_GUST + i] = Math.round(gust).toString();
-          target[keys.COLUMN_RAIN + i] = Math.round(h.pop * 100) + "%";
-          target[keys.COLUMN_UV + i]   = Math.round(h.uvi);
-          
-          // Index 0 accesses the primary weather condition array block
-          target[keys.COLUMN_COND + i] = h.weather[0].id;
-          target[keys.IS_NIGHT + i]    = h.weather[0].icon.includes('n') ? 1 : 0;
-          hoursData.push({dt:h.dt,time:target[keys.COLUMN_TIME+i],temp:target[keys.COLUMN_TEMP+i],wind:target[keys.COLUMN_WIND+i],gust:target[keys.COLUMN_GUST+i],rain:target[keys.COLUMN_RAIN+i],uv:target[keys.COLUMN_UV+i],cond:target[keys.COLUMN_COND+i],night:target[keys.IS_NIGHT+i]});
-        }
-
-        // ==============================================================================
-        // REVERSE GEOCODING & FALLBACK LOGIC
-        // ==============================================================================
-        
-        // Primary fallback: Extract city from generic timezone string (e.g., "America/New_York")
-        var fallbackName = manualLabel || "GPS Fix";
-        if (json.timezone) {
-          var tzParts = json.timezone.split('/');
-          if (tzParts.length > 1) {
-            fallbackName = tzParts[1].replace('_', ' '); // Converts "New_York" to "New York"
-          }
-        }
-
-        if (manualLabel) { completeForecast(hoursData, manualLabel, timeFormat, unitType, windUnit, gustsEnabled, sunrise, sunset); return; }
-        // Attempt secondary API call for precise local city name
-        var geoUrl = 'https://api.openweathermap.org/geo/1.0/reverse?lat=' + lat + '&lon=' + lon + '&limit=1&appid=' + apiKey;
-        var geoXhr = new XMLHttpRequest();
-        
-        geoXhr.onload = function() {
-          var locationName = fallbackName;
-          if (this.status === 200) {
-            var geoJson;
-            try { geoJson = JSON.parse(this.responseText); } catch(e) { geoJson = []; }
-            if (geoJson && geoJson.length > 0 && geoJson[0].name) {
-              locationName = geoJson[0].name; // Successfully pulled true city name
-            }
-          }
-          
-          // Insert location into the first chunk and initiate transfer
-          completeForecast(hoursData, locationName, timeFormat, unitType, windUnit, gustsEnabled, sunrise, sunset);
-        };
-
-        // If the secondary API drops or times out, immediately push the fallback to avoid a stuck UI
-        geoXhr.onerror = function() {
-          completeForecast(hoursData, fallbackName, timeFormat, unitType, windUnit, gustsEnabled, sunrise, sunset);
-        };
-
-        geoXhr.ontimeout = geoXhr.onerror;
-        geoXhr.timeout = 10000;
-        geoXhr.open('GET', geoUrl);
-        geoXhr.send();
-      } else { console.log('Weather HTTP ' + this.status); showStatus('Weather API error ' + this.status); scheduleRetry(); }
-    };
-    xhr.onerror = xhr.ontimeout = function() { console.log('Weather network error'); scheduleRetry(); };
-    xhr.timeout = 15000;
-    xhr.open('GET', url);
-    xhr.send();
+// All provider adapters normalize to Celsius, m/s, probability [0,1], and UTC seconds.
+// The watch protocol stays the existing atomic 24-hour two-part transfer.
+function wmoCode(c) {
+  if(c===0)return 800;if(c===1)return 801;if(c===2)return 802;
+  if(c===3)return 803;if(c>=45&&c<=48)return 701;
+  if(c>=51&&c<=57)return 500;if(c>=61&&c<=67)return 502;
+  if(c>=71&&c<=77)return 601;if(c>=80&&c<=82)return 520;
+  if(c>=95)return 200;return 803;
+}
+function textCode(t) {
+  t=String(t||'').toLowerCase();
+  if(t.indexOf('thunder')>=0)return 200;
+  if(t.indexOf('snow')>=0||t.indexOf('sleet')>=0)return 601;
+  if(t.indexOf('rain')>=0||t.indexOf('shower')>=0)return 501;
+  if(t.indexOf('fog')>=0)return 701;
+  if(t.indexOf('clear')>=0||t.indexOf('sunny')>=0||t.indexOf('fair')>=0)return 800;
+  if(t.indexOf('partly')>=0)return 801;return 803;
+}
+function httpJson(url, done, headers) {
+  var xhr=new XMLHttpRequest();
+  xhr.timeout=15000;
+  xhr.onload=function() {
+    if(xhr.status<200||xhr.status>=300){done(new Error('HTTP '+xhr.status));return;}
+    try {done(null,JSON.parse(xhr.responseText));}catch(e){done(e);}
+  };
+  xhr.onerror=xhr.ontimeout=function(){done(new Error('Network timeout'));};
+  xhr.open('GET',url);
+  if(headers)Object.keys(headers).forEach(function(k){try{xhr.setRequestHeader(k,headers[k]);}catch(e){}});
+  xhr.send();
+}
+function providerData(name,lat,lon,apiKey,done) {
+  var base='lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
+  if(name==='openmeteo') {
+    httpJson('https://api.open-meteo.com/v1/forecast?latitude='+lat+'&longitude='+lon+
+      '&hourly=temperature_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,uv_index,is_day'+
+      '&daily=sunrise,sunset&timeformat=unixtime&timezone=auto&wind_speed_unit=ms&forecast_days=3',
+      function(err,r){
+        if(err){done(err);return;}
+        try {
+          var a=r.hourly, rows=[];
+          for(var i=0;i<a.time.length;i++)rows.push({dt:a.time[i],temp:a.temperature_2m[i],
+            wind:a.wind_speed_10m[i],gust:a.wind_gusts_10m[i],pop:a.precipitation_probability[i]/100,
+            uv:a.uv_index[i],cond:wmoCode(a.weather_code[i]),night:a.is_day[i]===0?1:0});
+          done(null,{rows:rows,sunrise:r.daily&&r.daily.sunrise,sunset:r.daily&&r.daily.sunset});
+        }catch(e){done(e);}
+      });return;
   }
-  var locationMode = setting(settings, keys.LOCATION_MODE, 'LOCATION_MODE', 'gps');
-  var locationQuery = String(setting(settings, keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim();
-  if (locationMode === 'manual') {
-    if (!locationQuery) { requestInProgress = false; showStatus('Enter ZIP or city'); return; }
-    var geocodeUrl = /^\\d{5}$/.test(locationQuery) ?
-      'https://api.openweathermap.org/geo/1.0/zip?zip=' + encodeURIComponent(locationQuery + ',US') + '&appid=' + apiKey :
-      'https://api.openweathermap.org/geo/1.0/direct?q=' + encodeURIComponent(locationQuery) + '&limit=1&appid=' + apiKey;
-    var geo = new XMLHttpRequest();
-    geo.onload = function() {
-      try {
-        if (geo.status !== 200) throw new Error('Geocoding HTTP ' + geo.status);
-        var result = JSON.parse(geo.responseText);
-        var place = Array.isArray(result) ? result[0] : result;
-        if (!place || typeof place.lat !== 'number' || typeof place.lon !== 'number') throw new Error('Location not found');
-        weatherAt(place.lat, place.lon, place.name || locationQuery);
-      } catch(e) { console.log(e.message); showStatus('Location not found'); scheduleRetry(); }
-    };
-    geo.onerror = geo.ontimeout = function() { showStatus('Location lookup failed'); scheduleRetry(); };
-    geo.timeout = 12000;
-    geo.open('GET', geocodeUrl);
-    geo.send();
-  } else {
-    navigator.geolocation.getCurrentPosition(function(pos) { weatherAt(pos.coords.latitude, pos.coords.longitude, null); },
-      function(error) { console.log('GPS error: ' + error.message); requestInProgress = false; showStatus('Location unavailable'); sendCachedWeather(); scheduleRetry(); },
-      {timeout: 12000, maximumAge: 300000});
+  if(name==='openweather') {
+    if(!apiKey){done(new Error('OpenWeather API key required'));return;}
+    httpJson('https://api.openweathermap.org/data/3.0/onecall?'+base+
+      '&exclude=minutely,daily&units=metric&appid='+encodeURIComponent(apiKey),function(err,r){
+      if(err){done(err);return;}
+      try{done(null,{rows:r.hourly.map(function(h){return {dt:h.dt,temp:h.temp,wind:h.wind_speed,
+        gust:h.wind_gust,pop:h.pop,uv:h.uvi,cond:h.weather[0].id,
+        night:/n$/.test(h.weather[0].icon)?1:0};}),
+        sunrise:r.current&&r.current.sunrise,sunset:r.current&&r.current.sunset});}
+      catch(e){done(e);}
+    });return;
+  }
+  if(name==='nws') {
+    if(lat<18||lat>72||lon< -180||lon> -60){done(new Error('NWS outside US'));return;}
+    httpJson('https://api.weather.gov/points/'+lat.toFixed(4)+','+lon.toFixed(4),function(err,r){
+      if(err){done(err);return;}
+      var url=r.properties&&r.properties.forecastHourly;
+      if(!url){done(new Error('NWS no forecast'));return;}
+      httpJson(url,function(err,f){
+        if(err){done(err);return;}
+        try{done(null,{rows:f.properties.periods.map(function(p){
+          var wind=parseFloat(p.windSpeed)||0;
+          var mps=/km\/h|kph/i.test(p.windSpeed)?wind/3.6:wind*0.44704;
+          return {dt:Date.parse(p.startTime)/1000,temp:p.temperatureUnit==='F'?(p.temperature-32)*5/9:p.temperature,
+            wind:mps,gust:mps,pop:p.probabilityOfPrecipitation&&p.probabilityOfPrecipitation.value!=null?
+            p.probabilityOfPrecipitation.value/100:null,uv:null,cond:textCode(p.shortForecast),
+            night:p.isDaytime?0:1};
+        })});}catch(e){done(e);}
+      });
+    });return;
+  }
+  if(name==='metno') {
+    httpJson('https://api.met.no/weatherapi/locationforecast/2.0/compact?lat='+lat.toFixed(4)+'&lon='+lon.toFixed(4),
+      function(err,r){
+        if(err){done(err);return;}
+        try{done(null,{rows:r.properties.timeseries.map(function(p){
+          var d=p.data.instant.details;
+          var next=p.data.next_1_hours||p.data.next_6_hours||p.data.next_12_hours||{};
+          var sym=next.summary&&next.summary.symbol_code||'';
+          return {dt:Date.parse(p.time)/1000,temp:d.air_temperature,wind:d.wind_speed,gust:d.wind_speed_of_gust,
+            pop:next.details&&next.details.probability_of_precipitation!=null?
+              next.details.probability_of_precipitation/100:null,
+            uv:d.ultraviolet_index_clear_sky!=null?d.ultraviolet_index_clear_sky:null,
+            cond:textCode(sym),night:/night/.test(sym)?1:0};
+        })});}catch(e){done(e);}
+      },{'User-Agent':'TimelineWX/1.0 (https://github.com/ericlmccormick/Pebble_Hourly_Weather)'});
+  }
+}
+function fetchWeather() {
+  if(requestInProgress){refreshQueued=true;return;}
+  requestInProgress=true;
+  var s=currentSettings();
+  var provider=setting(s,keys.WEATHER_PROVIDER,'WEATHER_PROVIDER','auto');
+  var apiKey=setting(s,keys.API_KEY,'API_KEY','');
+  var tempUnit=setting(s,keys.TEMP_UNIT,'TEMP_UNIT',null)||
+    (setting(s,keys.UNITS,'UNITS','imperial')==='metric'?'C':'F');
+  var windUnit=setting(s,keys.WIND_UNIT,'WIND_UNIT','mph');
+  if(windUnit==='kph')windUnit='kmh';if(windUnit==='mps')windUnit='ms';
+  var timeFormat=setting(s,keys.TIME_FORMAT,'TIME_FORMAT','12h');
+  var locationMode=setting(s,keys.LOCATION_MODE,'LOCATION_MODE','gps');
+  var locationQuery=String(setting(s,keys.LOCATION_QUERY,'LOCATION_QUERY','')).trim();
+  function fail(message){console.log(message);showStatus(message);scheduleRetry();}
+  function run(lat,lon,label) {
+    var providers=provider==='auto'?(lat>=24&&lat<=50&&lon>=-125&&lon<=-66?
+      ['openmeteo','nws','metno']:['openmeteo','metno']):[provider];
+    function attempt(i) {
+      if(i>=providers.length){fail('All weather sources failed');return;}
+      var name=providers[i];
+      providerData(name,lat,lon,apiKey,function(err,data) {
+        if(err){console.log(name+': '+err);if(provider==='auto')attempt(i+1);else fail(name+' failed: '+err.message);return;}
+        var now=Math.floor(Date.now()/1000);
+        var rows=data.rows.filter(function(h){return h.dt>=now-3600&&h.dt<now+49*3600;}).slice(0,24);
+        if(rows.length<6){if(provider==='auto')attempt(i+1);else fail('Incomplete '+name+' forecast');return;}
+        var formatted=rows.map(function(h){
+          var hr=new Date(h.dt*1000).getHours();
+          var t=timeFormat==='24h'?(hr<10?'0':'')+hr:(hr%12||12)+(hr>=12?'p':'a');
+          var c=h.temp, v=tempUnit==='F'?c*9/5+32:tempUnit==='K'?c+273.15:
+            tempUnit==='R'?(c+273.15)*9/5:c;
+          var ws=windUnit==='ms'?h.wind:windUnit==='kmh'?h.wind*3.6:
+            windUnit==='knots'?h.wind*1.94384:h.wind*2.23694;
+          var gust=h.gust==null?h.wind:h.gust;
+          gust=windUnit==='ms'?gust:windUnit==='kmh'?gust*3.6:
+            windUnit==='knots'?gust*1.94384:gust*2.23694;
+          return {dt:h.dt,time:String(t),temp:String(Math.round(v))+(tempUnit==='F'?'°':tempUnit),
+            wind:String(Math.round(ws)),gust:String(Math.round(gust)),
+            rain:h.pop==null?'--':String(Math.round(h.pop*100))+'%',
+            uv:h.uv==null?0:Math.round(h.uv),cond:h.cond,night:h.night};
+        });
+        var sunrise=data.sunrise,sunset=data.sunset;
+        if(Array.isArray(sunrise)){
+          var day=0;while(day<sunrise.length-1&&sunset[day]<now)day++;
+          sunrise=sunrise[day];sunset=sunset[day];
+        }
+        completeForecast(formatted,label||name,timeFormat,tempUnit,windUnit,
+          setting(s,keys.SHOW_GUSTS,'SHOW_GUSTS',false),sunrise,sunset);
+        showStatus('Updated: '+name);
+      });
+    }
+    attempt(0);
+  }
+  if(locationMode==='manual'){
+    if(!locationQuery){fail('Enter ZIP or city');return;}
+    var zip=/^\d{5}(?:,US)?$/i.test(locationQuery);
+    var query=locationQuery.replace(/,US$/i,'');
+    var url=zip?'https://api.zippopotam.us/us/'+encodeURIComponent(query):
+      'https://geocoding-api.open-meteo.com/v1/search?name='+encodeURIComponent(query)+'&count=1&format=json';
+    httpJson(url,function(err,r){
+      if(err){fail('Location lookup failed');return;}
+      var p=zip&&r.places&&r.places[0];
+      var g=!zip&&r.results&&r.results[0];
+      if(!p&&!g){fail('Location not found');return;}
+      run(Number(p?p.latitude:g.latitude),Number(p?p.longitude:g.longitude),
+        zip?query:(g.name||query));
+    });
+  }else{
+    navigator.geolocation.getCurrentPosition(function(p){run(p.coords.latitude,p.coords.longitude,'GPS Fix');},
+      function(){fail('GPS unavailable');},{timeout:12000,maximumAge:300000});
   }
 }
 
@@ -302,7 +316,9 @@ Pebble.addEventListener('ready', function() {
   sendThemeSetting();
   sendCachedWeather();
   fetchWeather();
-  refreshTimer = setInterval(fetchWeather, REFRESH_MS);
+  var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
+  REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
+  refreshTimer=setInterval(fetchWeather,REFRESH_MS);
 });
 Pebble.addEventListener('appmessage', function(e) {
   if (e.payload && e.payload[keys.REFRESH_REQUEST]) fetchWeather();
@@ -310,5 +326,5 @@ Pebble.addEventListener('appmessage', function(e) {
 
 // Triggers when the user closes the Clay Settings menu on their phone
 Pebble.addEventListener('webviewclosed', function(e) {
-  if (e && e.response) { retryCount = 0; sendThemeSetting(); fetchWeather(); } // Refresh data with new user settings
+  if (e && e.response) { retryCount=0; sendThemeSetting(); if(refreshTimer)clearInterval(refreshTimer); var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30)); REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000; refreshTimer=setInterval(fetchWeather,REFRESH_MS); fetchWeather(); } // Refresh data with new user settings
 });
