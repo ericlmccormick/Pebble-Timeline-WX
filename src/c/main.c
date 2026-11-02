@@ -9,18 +9,19 @@ static Window *s_main_window;       // The primary window for the app
 static Layer *s_canvas_layer;       // The custom drawing layer for the grid
 
 // Data arrays sized for a full 24-hour forecast
-static char s_forecast_data[24][4][10]; // Stores text data: [Hour][Data Type][String Value]
-static int s_uv_values[24];             // Stores the raw UV index integers
-static int s_is_night[24];              // Boolean flag (1 or 0) for day/night icon selection
-static int s_conditions[24];            // OpenWeather condition ID codes (e.g., 500 = light rain)
-static GBitmap *s_icon_bitmaps[24];     // Pointers to the loaded image assets in memory
-static char s_pending_data[24][4][10];
-static int s_pending_uv[24], s_pending_night[24], s_pending_conditions[24], s_pending_gust[24];
-static int s_gust[24], s_forecast_count = 24, s_pending_count = 0;
+static char s_forecast_data[48][4][10]; // Stores text data: [Hour][Data Type][String Value]
+static int s_uv_values[48];             // Stores the raw UV index integers
+static int s_is_night[48];              // Boolean flag (1 or 0) for day/night icon selection
+static int s_conditions[48];            // OpenWeather condition ID codes (e.g., 500 = light rain)
+static GBitmap *s_icon_bitmaps[48];     // Pointers to the loaded image assets in memory
+static char s_pending_data[48][4][10];
+static int s_pending_uv[48], s_pending_night[48], s_pending_conditions[48], s_pending_gust[48];
+static int s_gust[48], s_forecast_count = 0, s_pending_count = 0;
 static int s_pending_wind_unit = 0;
 static bool s_pending_metric = false, s_pending_gust_enabled = false, s_gust_enabled = false;
 static time_t s_forecast_timestamp = 0, s_pending_timestamp = 0;
 static bool s_cached = false, s_pending_cached = false, s_pending_first = false;
+static int s_pending_next_part = 0;
 static int s_selected_hour = 0;
 static char s_pending_location[32] = "";
 static char s_status[48] = "";
@@ -54,7 +55,7 @@ static void invalidate_icon(int idx) {
   }
 }
 static void update_icons_for_view() {
-  for(int i = 0; i < 24; i++) {
+  for(int i = 0; i < 48; i++) {
     // Check if the index falls within the currently visible 6-hour window
     if (i >= s_scroll_offset && i < s_scroll_offset + (s_show_banner ? 5 : 6)) {
       
@@ -354,7 +355,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, 24, 2, bounds.size.h - 24 - bottom_margin), 0, GCornerNone);
   
   // Calculate relative handle position based on offset
-  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 18);
+  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 42);
   graphics_context_set_fill_color(ctx, dark ? GColorWhite : GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
@@ -405,9 +406,10 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     memset(s_pending_conditions, 0, sizeof(s_pending_conditions));
     memset(s_pending_gust, 0, sizeof(s_pending_gust));
     s_pending_first = true;
+    s_pending_next_part = 2;
     s_pending_count = 0;
     s_pending_location[0] = '\0';
-  } else if (number != 2 || !s_pending_first) return;
+  } else if (!s_pending_first || number != s_pending_next_part || number > 4) return;
   Tuple *t = dict_read_first(iterator);
   while (t) {
     uint32_t key = t->key;
@@ -427,23 +429,24 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     else if (key == MESSAGE_KEY_FORECAST_CACHED) s_pending_cached = t->value->int32 != 0;
     else if (key == MESSAGE_KEY_GUSTS_ENABLED) s_pending_gust_enabled = t->value->int32 != 0;
     else if (key == MESSAGE_KEY_TRANSFER_COUNT || key == MESSAGE_KEY_FORECAST_COUNT) s_pending_count = (int)t->value->int32;
-    else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 24) s_pending_night[key-MESSAGE_KEY_IS_NIGHT] = t->value->int32;
-    else if (key >= MESSAGE_KEY_COLUMN_COND && key < MESSAGE_KEY_COLUMN_COND + 24) s_pending_conditions[key-MESSAGE_KEY_COLUMN_COND] = t->value->int32;
-    else if (key >= MESSAGE_KEY_COLUMN_TIME && key < MESSAGE_KEY_COLUMN_TIME + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TIME][0], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_TEMP && key < MESSAGE_KEY_COLUMN_TEMP + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TEMP][1], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_WIND && key < MESSAGE_KEY_COLUMN_WIND + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_WIND][2], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_RAIN && key < MESSAGE_KEY_COLUMN_RAIN + 24) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_RAIN][3], 10, "%s", t->value->cstring);
-    else if (key >= MESSAGE_KEY_COLUMN_UV && key < MESSAGE_KEY_COLUMN_UV + 24) s_pending_uv[key-MESSAGE_KEY_COLUMN_UV] = t->value->int32;
-    else if (key >= MESSAGE_KEY_COLUMN_GUST && key < MESSAGE_KEY_COLUMN_GUST + 24) s_pending_gust[key-MESSAGE_KEY_COLUMN_GUST] = atoi(t->value->cstring);
+    else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 48) s_pending_night[key-MESSAGE_KEY_IS_NIGHT] = t->value->int32;
+    else if (key >= MESSAGE_KEY_COLUMN_COND && key < MESSAGE_KEY_COLUMN_COND + 48) s_pending_conditions[key-MESSAGE_KEY_COLUMN_COND] = t->value->int32;
+    else if (key >= MESSAGE_KEY_COLUMN_TIME && key < MESSAGE_KEY_COLUMN_TIME + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TIME][0], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_TEMP && key < MESSAGE_KEY_COLUMN_TEMP + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_TEMP][1], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_WIND && key < MESSAGE_KEY_COLUMN_WIND + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_WIND][2], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_RAIN && key < MESSAGE_KEY_COLUMN_RAIN + 48) snprintf(s_pending_data[key-MESSAGE_KEY_COLUMN_RAIN][3], 10, "%s", t->value->cstring);
+    else if (key >= MESSAGE_KEY_COLUMN_UV && key < MESSAGE_KEY_COLUMN_UV + 48) s_pending_uv[key-MESSAGE_KEY_COLUMN_UV] = t->value->int32;
+    else if (key >= MESSAGE_KEY_COLUMN_GUST && key < MESSAGE_KEY_COLUMN_GUST + 48) s_pending_gust[key-MESSAGE_KEY_COLUMN_GUST] = atoi(t->value->cstring);
     t = dict_read_next(iterator);
   }
-  if (number == 2) {
+  if (number < 4) { s_pending_next_part++; return; }
+  if (number == 4) {
     s_pending_first = false;
-    if (s_pending_count < 1 || s_pending_count > 24) return;
+    if (s_pending_count < 1 || s_pending_count > 48) return;
     for (int i=0;i<s_pending_count;i++) {
       if (!s_pending_data[i][0][0]) return; // reject incomplete transfers
     }
-    for (int i=0;i<24;i++) invalidate_icon(i);
+    for (int i=0;i < 48;i++) invalidate_icon(i);
     memcpy(s_forecast_data, s_pending_data, sizeof(s_forecast_data));
     memcpy(s_uv_values, s_pending_uv, sizeof(s_uv_values));
     memcpy(s_is_night, s_pending_night, sizeof(s_is_night));
@@ -494,7 +497,7 @@ static void init() {
   
   // Register Bluetooth callbacks and open a large 8kb buffer for 24h payloads
   app_message_register_inbox_received(inbox_received_callback);
-  app_message_open(8192, 512);
+  app_message_open(4096, 512);
   tick_timer_service_subscribe(MINUTE_UNIT, auto_theme_tick); 
 }
 
@@ -503,7 +506,7 @@ static void deinit() {
   tick_timer_service_unsubscribe();
   if (s_banner_timer) app_timer_cancel(s_banner_timer); // Clear lingering timers
   if (s_status_timer) app_timer_cancel(s_status_timer);
-  for(int i = 0; i < 24; i++) { 
+  for(int i = 0; i < 48; i++) { 
     if(s_icon_bitmaps[i]) gbitmap_destroy(s_icon_bitmaps[i]); // Free graphic RAM
   }
   layer_destroy(s_canvas_layer);
