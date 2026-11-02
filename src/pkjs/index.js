@@ -68,7 +68,8 @@ function sendThemeSetting() {
 function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var settings=currentSettings(), units=setting(settings,keys.TEMP_UNIT,'TEMP_UNIT','F');
   var wind=windPreference(settings,units), count=Math.min(hours.length,48);
-  var chunks=Array.from({length:Math.ceil(count/6)},function(){return {};});
+  var chunks=[];
+  for(var ci=0;ci<Math.ceil(count/6);ci++) chunks.push({});
   var first=chunks[0];
   first[keys.COLOR_MODE]=setting(settings,keys.COLOR_MODE,'COLOR_MODE','auto');
   if(hours.sunrise&&hours.sunset){first[keys.SUNRISE]=hours.sunrise;first[keys.SUNSET]=hours.sunset;}
