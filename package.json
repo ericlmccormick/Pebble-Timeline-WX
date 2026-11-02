@@ -35,7 +35,8 @@
             "FORECAST_COUNT",
             "TRANSFER_PART",
             "TRANSFER_COUNT",
-            "STATUS_TEXT"
+            "STATUS_TEXT",
+            "COLOR_MODE"
         ],
         "projectType": "native",
         "resources": {
