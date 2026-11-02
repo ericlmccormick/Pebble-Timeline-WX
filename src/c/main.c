@@ -387,6 +387,126 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 // ==============================================================================
 
 // Callback triggered whenever the phone sends a chunk of data
+
+// A compact copy of each accepted part is kept for persistence.
+#define WEATHER_CACHE_MAGIC 0x57584332
+#define WEATHER_CACHE_META_KEY 7100
+#define WEATHER_CACHE_PART_KEY 7110
+static uint8_t s_pending_packed[8][120];
+static uint8_t s_pending_packed_len[8];
+
+typedef struct {
+  uint32_t magic;
+  uint32_t fingerprint;
+  int32_t count;
+  int32_t timestamp;
+  int32_t sunrise;
+  int32_t sunset;
+  int32_t wind_unit;
+  int32_t color_mode;
+  uint8_t metric;
+  uint8_t gusts;
+  uint8_t cached;
+  uint8_t reserved;
+  char location[32];
+} WeatherCacheMeta;
+
+static uint32_t forecast_checksum(int count) {
+  uint32_t h = 2166136261u;
+  for (int part = 0; part < (count + 5) / 6; part++) {
+    for (int i = 0; i < s_pending_packed_len[part]; i++) {
+      h ^= s_pending_packed[part][i];
+      h *= 16777619u;
+    }
+  }
+  return h;
+}
+
+static void decode_forecast_bytes(const uint8_t *data, int count, int offset) {
+  for (int r = 0; r < count && offset+r < 48; r++) {
+    int i = offset + r;
+    const uint8_t *b = data + r * 20;
+    memcpy(s_pending_data[i][0], b, 4);
+    s_pending_data[i][0][4] = '\0';
+    memcpy(s_pending_data[i][1], b + 4, 7);
+    s_pending_data[i][1][7] = '\0';
+    unsigned int wind = b[11] | ((unsigned int)b[12] << 8);
+    unsigned int gust = b[13] | ((unsigned int)b[14] << 8);
+    snprintf(s_pending_data[i][2], 10, "%u", wind);
+    if (b[15] == 255) snprintf(s_pending_data[i][3], 10, "--");
+    else snprintf(s_pending_data[i][3], 10, "%u%%", b[15]);
+    s_pending_uv[i] = b[16] == 255 ? -1 : (int)b[16];
+    s_pending_conditions[i] = b[17] | ((int)b[18] << 8);
+    s_pending_night[i] = b[19] ? 1 : 0;
+    s_pending_gust[i] = (int)gust;
+  }
+}
+
+static void store_complete_forecast(void) {
+  if (s_forecast_count < 1 || s_forecast_count > 48) return;
+  WeatherCacheMeta meta = {
+    .magic = WEATHER_CACHE_MAGIC, .fingerprint = forecast_checksum(s_forecast_count),
+    .count = s_forecast_count, .timestamp = (int32_t)s_forecast_timestamp,
+    .sunrise = (int32_t)s_sunrise, .sunset = (int32_t)s_sunset,
+    .wind_unit = s_wind_unit, .color_mode = s_color_mode,
+    .metric = s_is_metric, .gusts = s_gust_enabled, .cached = s_cached
+  };
+  snprintf(meta.location, sizeof(meta.location), "%s", s_location_name);
+  // A failed or interrupted write cannot be mistaken for a valid cache:
+  // rows are written first and the checksum-bearing manifest is written last.
+  for (int i = 0; i < (s_forecast_count + 5) / 6; i++) {
+    if (persist_write_data(WEATHER_CACHE_PART_KEY + i,
+                           s_pending_packed[i], s_pending_packed_len[i]) != s_pending_packed_len[i]) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Unable to persist forecast part %d", i);
+      return;
+    }
+  }
+  if (persist_write_data(WEATHER_CACHE_META_KEY, &meta, sizeof(meta)) != sizeof(meta))
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Unable to persist forecast metadata");
+}
+
+static void restore_persisted_forecast(void) {
+  WeatherCacheMeta meta;
+  if (persist_read_data(WEATHER_CACHE_META_KEY, &meta, sizeof(meta)) != sizeof(meta) ||
+      meta.magic != WEATHER_CACHE_MAGIC || meta.count < 1 || meta.count > 48) return;
+  int parts = (meta.count + 5) / 6;
+  for (int i = 0; i < parts; i++) {
+    int expected = (meta.count - i * 6) * 20;
+    if (expected > 120) expected = 120;
+    int received = persist_read_data(WEATHER_CACHE_PART_KEY+i, s_pending_packed[i], expected);
+    if (received != expected) return;
+    s_pending_packed_len[i] = expected;
+  }
+  if (forecast_checksum(meta.count) != meta.fingerprint) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Persisted forecast checksum mismatch");
+    return;
+  }
+  for (int p = 0; p < parts; p++)
+    decode_forecast_bytes(s_pending_packed[p], s_pending_packed_len[p]/20, p*6);
+  for (int i = 0; i < meta.count; i++) {
+    memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
+    s_uv_values[i] = s_pending_uv[i];
+    s_is_night[i] = s_pending_night[i];
+    s_conditions[i] = s_pending_conditions[i];
+    s_gust[i] = s_pending_gust[i];
+  }
+  s_forecast_count = meta.count;
+  s_forecast_timestamp = (time_t)meta.timestamp;
+  s_sunrise = (time_t)meta.sunrise;
+  s_sunset = (time_t)meta.sunset;
+  s_wind_unit = meta.wind_unit;
+  s_color_mode = meta.color_mode;
+  s_is_metric = meta.metric != 0;
+  s_gust_enabled = meta.gusts != 0;
+  s_cached = true;
+  s_has_forecast = true;
+  snprintf(s_location_name, sizeof(s_location_name), "%s", meta.location);
+  s_last_auto_dark = is_dark_mode();
+  update_icons_for_view();
+  layer_mark_dirty(s_canvas_layer);
+  APP_LOG(APP_LOG_LEVEL_INFO, "Restored %d forecast hours from watch storage", meta.count);
+}
+
 static int s_last_acked_part = 0;
 static int32_t s_pending_transfer_id = 0;
 static int32_t s_last_acked_transfer_id = 0;
@@ -458,6 +578,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_pending_next_part = 2;
     s_pending_count = 0;
     s_pending_location[0] = '\0';
+    memset(s_pending_packed_len, 0, sizeof(s_pending_packed_len));
   } else if (!s_pending_first || transfer_id != s_pending_transfer_id || (number != s_pending_next_part && number != s_pending_next_part - 1)) return;
   if (number != 1 && number == s_pending_next_part - 1) {
     acknowledge_forecast_part(number, transfer_id);
@@ -501,25 +622,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid compact chunk length %d", blob->length);
       return;
     }
-    const uint8_t *data = blob->value->data;
-    const int offset = (number - 1) * 6;
-    for (int r = 0; r < count && offset+r < 48; r++) {
-      int i = offset + r;
-      const uint8_t *b = data + r * 20;
-      memcpy(s_pending_data[i][0], b, 4);
-      s_pending_data[i][0][4] = '\0';
-      memcpy(s_pending_data[i][1], b + 4, 7);
-      s_pending_data[i][1][7] = '\0';
-      unsigned int wind = b[11] | ((unsigned int)b[12] << 8);
-      unsigned int gust = b[13] | ((unsigned int)b[14] << 8);
-      snprintf(s_pending_data[i][2], 10, "%u", wind);
-      if (b[15] == 255) snprintf(s_pending_data[i][3], 10, "--");
-      else snprintf(s_pending_data[i][3], 10, "%u%%", b[15]);
-      s_pending_uv[i] = b[16] == 255 ? -1 : (int)b[16];
-      s_pending_conditions[i] = b[17] | ((int)b[18] << 8);
-      s_pending_night[i] = b[19] ? 1 : 0;
-      s_pending_gust[i] = (int)gust;
-    }
+    decode_forecast_bytes(blob->value->data, count, (number-1)*6);
   }
   int total = s_pending_count;
   if (total < 1 || total > 48) { APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast count %d in part %d", total, number); return; }
@@ -530,6 +633,10 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   for (int i = start; i < end; i++) {
     if (!s_pending_data[i][0][0] || !s_pending_data[i][1][0] ||
         !s_pending_data[i][2][0] || !s_pending_data[i][3][0]) { APP_LOG(APP_LOG_LEVEL_WARNING, "Missing data in part %d hour %d", number, i); return; }
+  }
+  if (blob) {
+    memcpy(s_pending_packed[number-1], blob->value->data, blob->length);
+    s_pending_packed_len[number-1] = blob->length;
   }
   // Keep the last complete forecast visible until ALL chunks arrive.
   // Never expose a partial refresh to the scrolling UI.
@@ -556,6 +663,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     if (s_scroll_offset > total - 6) s_scroll_offset = total > 6 ? total - 6 : 0;
     s_has_forecast = true;
     s_pending_first = false;
+    store_complete_forecast();
     update_icons_for_view();
     layer_mark_dirty(s_canvas_layer);
     if (s_pending_location[0]) {
@@ -589,6 +697,7 @@ static void init() {
   window_set_click_config_provider(s_main_window, click_config_provider);
   window_set_window_handlers(s_main_window, (WindowHandlers) { .load = main_window_load });
   window_stack_push(s_main_window, true);
+  restore_persisted_forecast();
   
   // Each message carries six hours; acknowledge validated chunks.
   app_message_register_inbox_received(inbox_received_callback);
