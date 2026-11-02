@@ -18,30 +18,65 @@ var requestInProgress = false;
 
 function scheduleRetry() {
   requestInProgress = false;
-  if (retryCount >= MAX_RETRIES) return;
+  if (retryCount >= MAX_RETRIES) { showStatus('Update failed - old data'); return; }
   retryCount++;
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = setTimeout(fetchWeather, Math.min(60000 * Math.pow(2, retryCount - 1), 240000));
 }
 
+function showStatus(message) {
+  var payload = {};
+  payload[keys.STATUS_TEXT] = message;
+  Pebble.sendAppMessage(payload, null, function(e) { console.log('Status delivery failed'); });
+}
+function currentSettings() {
+  try { return JSON.parse(localStorage.getItem('clay-settings')) || {}; } catch(e) { return {}; }
+}
+function windPreference(settings, units) {
+  return settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (units === 'metric' ? 'kmh' : 'mph');
+}
 function sendCachedWeather() {
   try {
     var cache = JSON.parse(localStorage.getItem('lastForecast'));
-    if (cache && cache.savedAt && Date.now() - cache.savedAt < 6 * 3600000) {
-      var settings = JSON.parse(localStorage.getItem('clay-settings')) || {};
-      var selectedUnits = settings[keys.UNITS] || 'imperial';
-      var selectedWind = settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (selectedUnits === 'metric' ? 'kmh' : 'mph');
-      var selectedTime = settings[keys.TIME_FORMAT] || '12h';
-      if (cache.chunk1[keys.UNITS] !== selectedUnits ||
-          cache.chunk1[keys.WIND_UNIT] !== selectedWind ||
-          cache.timeFormat !== selectedTime) return false;
-      sendWeatherChunks(cache.chunk1, cache.chunk2);
-      return true;
-    }
-  } catch (e) { console.log('Invalid forecast cache: ' + e); }
-  return false;
+    if (!cache || !cache.hours || !cache.savedAt) return false;
+    var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
+    var wind = windPreference(settings, units), time = settings[keys.TIME_FORMAT] || '12h';
+    if (cache.units !== units || cache.windUnit !== wind || cache.timeFormat !== time) return false;
+    var hours = cache.hours.filter(function(h) { return h.dt >= Math.floor(Date.now()/1000) - 3600; });
+    if (!hours.length) { showStatus('Forecast expired'); return false; }
+    transmitHours(hours, cache.location, cache.savedAt, true, cache.gustsEnabled);
+    return true;
+  } catch(e) { console.log('Cache invalid: ' + e); return false; }
 }
-
+function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
+  var c1 = {}, c2 = {};
+  var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
+  var wind = windPreference(settings, units);
+  c1[keys.UNITS] = units;
+  c1[keys.WIND_UNIT] = wind;
+  c1[keys.FORECAST_TIMESTAMP] = Math.floor(savedAt / 1000);
+  c1[keys.FORECAST_CACHED] = cached ? 1 : 0;
+  c1[keys.LOCATION_NAME] = location || 'Current location';
+  c1[keys.GUSTS_ENABLED] = gustsEnabled ? 1 : 0;
+  c1[keys.FORECAST_COUNT] = Math.min(hours.length, 24);
+  var count = Math.min(hours.length, 24);
+  for (var i = 0; i < count; i++) {
+    var h = hours[i], target = i < 12 ? c1 : c2;
+    target[keys.COLUMN_TIME+i] = h.time;
+    target[keys.COLUMN_TEMP+i] = h.temp;
+    target[keys.COLUMN_WIND+i] = h.wind;
+    target[keys.COLUMN_RAIN+i] = h.rain;
+    target[keys.COLUMN_UV+i] = h.uv;
+    target[keys.COLUMN_COND+i] = h.cond;
+    target[keys.IS_NIGHT+i] = h.night;
+    target[keys.COLUMN_GUST+i] = h.gust;
+  }
+  // A complete forecast is published only after both parts arrive.
+  c1[keys.TRANSFER_PART] = 1;
+  c2[keys.TRANSFER_PART] = 2;
+  c2[keys.TRANSFER_COUNT] = count;
+  sendWeatherChunks(c1, c2);
+}
 function fetchWeather() {
   if (requestInProgress) return;
   requestInProgress = true;
@@ -55,7 +90,7 @@ function fetchWeather() {
   var windUnit = settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (unitType === 'metric' ? 'kmh' : 'mph');
   if (['mph', 'kmh', 'ms', 'knots'].indexOf(windUnit) < 0) windUnit = 'mph';
 
-  if (!apiKey) { console.log('OpenWeather API key missing'); requestInProgress = false; return; }
+  if (!apiKey) { requestInProgress = false; showStatus('Set API key in settings'); return; }
 
   // 2. Request current GPS coordinates from the phone OS
   navigator.geolocation.getCurrentPosition(function(pos) {
@@ -75,10 +110,8 @@ function fetchWeather() {
         if (!json.hourly || json.hourly.length < 24) { console.log('Incomplete hourly forecast'); scheduleRetry(); return; }
         
         // Prepare two separate dictionaries to prevent Bluetooth MTU overflow
-        var chunk1 = {};
-        var chunk2 = {};
-        chunk1[keys.UNITS] = unitType;
-        chunk1[keys.WIND_UNIT] = windUnit;
+        var hoursData = [];
+        var gustsEnabled = settings[keys.SHOW_GUSTS] === true || settings[keys.SHOW_GUSTS] === 'true';
 
         // 3. Process the next 24 hours of forecast data
         for(var i = 0; i < 24; i++) {
@@ -97,7 +130,7 @@ function fetchWeather() {
           }
 
           // Determine which transmission chunk this hour belongs to
-          var target = (i < 12) ? chunk1 : chunk2;
+          var target = {};
           
           // Populate the specific key-value pairs utilizing index offsets
           target[keys.COLUMN_TIME + i] = timeStr;
@@ -108,12 +141,16 @@ function fetchWeather() {
                               windUnit === 'kmh' ? windMs * 3.6 :
                               windUnit === 'knots' ? windMs * 1.94384449 : windMs * 2.23693629;
           target[keys.COLUMN_WIND + i] = Math.round(convertedWind).toString();
+          var gustMs = unitType === 'metric' ? (h.wind_gust || h.wind_speed) : (h.wind_gust || h.wind_speed) * 0.44704;
+          var gust = windUnit === 'ms' ? gustMs : windUnit === 'kmh' ? gustMs * 3.6 : windUnit === 'knots' ? gustMs * 1.94384449 : gustMs * 2.23693629;
+          target[keys.COLUMN_GUST + i] = Math.round(gust).toString();
           target[keys.COLUMN_RAIN + i] = Math.round(h.pop * 100) + "%";
           target[keys.COLUMN_UV + i]   = Math.round(h.uvi);
           
           // Index 0 accesses the primary weather condition array block
           target[keys.COLUMN_COND + i] = h.weather[0].id;
           target[keys.IS_NIGHT + i]    = h.weather[0].icon.includes('n') ? 1 : 0;
+          hoursData.push({dt:h.dt,time:target[keys.COLUMN_TIME+i],temp:target[keys.COLUMN_TEMP+i],wind:target[keys.COLUMN_WIND+i],gust:target[keys.COLUMN_GUST+i],rain:target[keys.COLUMN_RAIN+i],uv:target[keys.COLUMN_UV+i],cond:target[keys.COLUMN_COND+i],night:target[keys.IS_NIGHT+i]});
         }
 
         // ==============================================================================
@@ -136,34 +173,33 @@ function fetchWeather() {
         geoXhr.onload = function() {
           var locationName = fallbackName;
           if (this.status === 200) {
-            var geoJson = JSON.parse(this.responseText);
+            var geoJson;
+            try { geoJson = JSON.parse(this.responseText); } catch(e) { geoJson = []; }
             if (geoJson && geoJson.length > 0 && geoJson[0].name) {
               locationName = geoJson[0].name; // Successfully pulled true city name
             }
           }
           
           // Insert location into the first chunk and initiate transfer
-          chunk1[keys.LOCATION_NAME] = locationName;
-          completeForecast(chunk1, chunk2, timeFormat);
+          completeForecast(hoursData, locationName, timeFormat, unitType, windUnit, gustsEnabled);
         };
 
         // If the secondary API drops or times out, immediately push the fallback to avoid a stuck UI
         geoXhr.onerror = function() {
-          chunk1[keys.LOCATION_NAME] = fallbackName;
-          completeForecast(chunk1, chunk2);
+          completeForecast(hoursData, fallbackName, timeFormat, unitType, windUnit, gustsEnabled);
         };
 
         geoXhr.ontimeout = geoXhr.onerror;
         geoXhr.timeout = 10000;
         geoXhr.open('GET', geoUrl);
         geoXhr.send();
-      } else { console.log('Weather HTTP ' + this.status); scheduleRetry(); }
+      } else { console.log('Weather HTTP ' + this.status); showStatus('Weather API error ' + this.status); scheduleRetry(); }
     };
     xhr.onerror = xhr.ontimeout = function() { console.log('Weather network error'); scheduleRetry(); };
     xhr.timeout = 15000;
     xhr.open('GET', url);
     xhr.send();
-  }, function(error) { console.log('GPS error: ' + error.message); requestInProgress = false; sendCachedWeather(); scheduleRetry(); }, {timeout: 12000, maximumAge: 300000});
+  }, function(error) { console.log('GPS error: ' + error.message); requestInProgress = false; showStatus('Location unavailable'); sendCachedWeather(); scheduleRetry(); }, {timeout: 12000, maximumAge: 300000});
 }
 
 // ==============================================================================
@@ -171,19 +207,20 @@ function fetchWeather() {
 // ==============================================================================
 
 // Ensures the first 12 hours complete transmission before triggering the remaining 12
-function completeForecast(c1, c2, timeFormat) {
+function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled) {
   requestInProgress = false;
   retryCount = 0;
-  localStorage.setItem('lastForecast', JSON.stringify({chunk1:c1, chunk2:c2, timeFormat:timeFormat, savedAt:Date.now()}));
-  sendWeatherChunks(c1, c2);
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  var savedAt = Date.now();
+  localStorage.setItem('lastForecast', JSON.stringify({hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, savedAt:savedAt}));
+  transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
-
 function sendWeatherChunks(c1, c2, attempt) {
   attempt = attempt || 0;
   Pebble.sendAppMessage(c1, function() {
     Pebble.sendAppMessage(c2, function() { console.log('Forecast delivered'); }, function(e) {
       console.log('Second chunk failed: ' + JSON.stringify(e));
-      if (attempt < 2) setTimeout(function() { sendWeatherChunks(c1, c2, attempt + 1); }, 1500 * (attempt + 1));
+      if (attempt < 2) setTimeout(function() { sendWeatherChunks(c1, c2, attempt + 1); }, 1500 * (attempt + 1)); else showStatus('Watch transfer failed');
     });
   }, function(e) {
     console.log('First chunk failed: ' + JSON.stringify(e));
