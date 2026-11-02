@@ -14,17 +14,22 @@
         "displayName": "Scrollable Hourly Weather",
         "enableMultiJS": true,
         "messageKeys": [
-            "COLUMN_TIME[24]",
-            "COLUMN_TEMP[24]",
-            "COLUMN_WIND[24]",
-            "COLUMN_RAIN[24]",
-            "COLUMN_UV[24]",
-            "COLUMN_COND[24]",
-            "UNITS",
-            "API_KEY",
+            "ERROR_MSG",
             "TIME_FORMAT",
-            "IS_NIGHT[24]",
-            "LOCATION_NAME"
+            "LOCATION_NAME",
+            "REFRESH_INTERVAL",
+            "DARK_MODE",
+            "WEATHER_PROVIDER",
+            "TEMP_UNIT",
+            "WIND_UNIT",
+            "CHUNK_INDEX",
+            "CHUNK_DATA",
+            "REQUEST_CHUNK",
+            "SETTINGS_SYNC",
+            "REFRESH_REQUESTED",
+            "API_KEY",
+            "LOCATION_METHOD",
+            "ZIP_CODE"
         ],
         "projectType": "native",
         "resources": {
@@ -172,5 +177,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.0"
+    "version": "2.3.1"
 }
