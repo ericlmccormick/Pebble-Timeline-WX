@@ -14,6 +14,7 @@ static int s_uv_values[24];             // Stores the raw UV index integers
 static int s_is_night[24];              // Boolean flag (1 or 0) for day/night icon selection
 static int s_conditions[24];            // OpenWeather condition ID codes (e.g., 500 = light rain)
 static GBitmap *s_icon_bitmaps[24];     // Pointers to the loaded image assets in memory
+static int s_wind_unit = 0; // 0=mph, 1=km/h, 2=m/s, 3=knots
 static bool s_is_metric = false;        // Tracks user preference for Celsius/kmh vs Fahrenheit/mph
 
 // Navigation and Layout State
@@ -161,7 +162,9 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
   // 2. Define headers and column spacing
   char *temp_label = s_is_metric ? "°C" : "°F";
-  char *wind_label = s_is_metric ? "km/h" : "MPH"; 
+  char *wind_label = s_wind_unit == 1 ? "km/h" :
+                     s_wind_unit == 2 ? "m/s" :
+                     s_wind_unit == 3 ? "kt" : "MPH"; 
   char *headers[] = {"Time", "Cond", temp_label, wind_label, "Rain"};
   int x_pos[] = {5, 42, 85, 122, 160}; // X-coordinates for each column
 
@@ -222,7 +225,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
     // Draw Wind Column (High Wind Warning Color)
     int wind_val = atoi(s_forecast_data[idx][2]);
-    graphics_context_set_text_color(ctx, (wind_val >= (s_is_metric ? 32 : 20)) ? GColorOrange : GColorBlack);
+    graphics_context_set_text_color(ctx, (wind_val >= (s_wind_unit == 1 ? 32 : s_wind_unit == 2 ? 9 : s_wind_unit == 3 ? 17 : 20)) ? GColorOrange : GColorBlack);
     graphics_draw_text(ctx, s_forecast_data[idx][2], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
                        GRect(x_pos[3], y + 2, 40, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
@@ -294,6 +297,11 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     // Parse Units
     else if (key == MESSAGE_KEY_UNITS) {
       s_is_metric = (strcmp(t->value->cstring, "metric") == 0);
+    } else if (key == MESSAGE_KEY_WIND_UNIT) {
+      const char *unit = t->value->cstring;
+      s_wind_unit = strcmp(unit, "kmh") == 0 ? 1 :
+                    strcmp(unit, "ms") == 0 ? 2 :
+                    strcmp(unit, "knots") == 0 ? 3 : 0;
     } 
     // Parse Array Data (Offsets applied using Message Key Math)
     else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 24) {
