@@ -374,11 +374,19 @@ Pebble.addEventListener('ready', function() {
   refreshTimer=setInterval(fetchWeather,REFRESH_MS);
 });
 Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload && e.payload[keys.REFRESH_REQUEST]) {
-    var request = Number(e.payload[keys.REFRESH_REQUEST]);
-    if (request >= 101 && request <= 108) acknowledgePart(request - 100);
-    else fetchWeather();
-  }
+  var payload = e && e.payload;
+  if (!payload) { console.log('Watch appmessage without payload'); return; }
+  // Some Pebble bridges expose incoming keys by symbolic name instead of
+  // numeric ID. Support both representations and log the received payload.
+  console.log('Watch appmessage: ' + JSON.stringify(payload));
+  var raw = payload[keys.REFRESH_REQUEST];
+  if (raw === undefined) raw = payload.REFRESH_REQUEST;
+  if (raw === undefined) raw = payload[String(keys.REFRESH_REQUEST)];
+  if (raw === undefined || raw === null) return;
+  var request = Number(raw);
+  if (request >= 101 && request <= 108) acknowledgePart(request - 100);
+  else if (request === 1) fetchWeather();
+  else console.log('Unknown watch request: ' + request);
 });
 
 // Triggers when the user closes the Clay Settings menu on their phone
