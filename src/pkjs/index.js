@@ -71,7 +71,7 @@ function sendThemeSetting() {
   msg[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
   Pebble.sendAppMessage(msg, null, function(e) { console.log('Theme update failed: ' + JSON.stringify(e)); });
 }
-// Each row uses 20 bytes: ASCII time[4], ASCII temperature[7],
+// Each row uses 20 bytes: ASCII time[4], numeric ASCII temperature[7],
 // wind and gust uint16 LE, precipitation and UV bytes (255=missing),
 // condition uint16 LE, and night flag. Much smaller than 8 dictionaries
 // containing separate per-hour strings/integers.
@@ -87,7 +87,7 @@ function packForecastRows(hours, start, end) {
   }
   for (var i = start; i < end; i++) {
     var h = hours[i];
-    ascii(h.time, 4); ascii(h.temp, 7);
+    ascii(h.time, 4); ascii(String(parseInt(h.temp, 10)), 7);
     u16(h.wind); u16(h.gust);
     bytes.push(h.rain === '--' ? 255 : Math.max(0, Math.min(100, parseInt(h.rain, 10) || 0)));
     bytes.push(h.uv == null || Number(h.uv) < 0 ? 255 : Math.max(0, Math.min(254, Number(h.uv))));
@@ -105,6 +105,7 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   first[keys.COLOR_MODE]=setting(settings,keys.COLOR_MODE,'COLOR_MODE','auto');
   if(hours.sunrise&&hours.sunset){first[keys.SUNRISE]=hours.sunrise;first[keys.SUNSET]=hours.sunset;}
   first[keys.UNITS]=units==='C'?'metric':'imperial';
+  first[keys.TEMP_UNIT]=units;
   first[keys.WIND_UNIT]=wind;
   first[keys.FORECAST_TIMESTAMP]=Math.floor(savedAt/1000);
   first[keys.FORECAST_CACHED]=cached?1:0;
@@ -276,7 +277,7 @@ function fetchWeather(forceLocation) {
           var gust=h.gust==null?h.wind:h.gust;
           gust=windUnit==='ms'?gust:windUnit==='kmh'?gust*3.6:
             windUnit==='knots'?gust*1.94384:gust*2.23694;
-          return {dt:h.dt,time:String(t),temp:String(Math.round(v))+(tempUnit==='F'?'°':tempUnit),
+          return {dt:h.dt,time:String(t),temp:String(Math.round(v)),
             wind:String(Math.round(ws)),gust:String(Math.round(gust)),
             rain:h.pop==null?'--':String(Math.round(h.pop*100))+'%',
             uv:h.uv==null?-1:Math.round(h.uv),cond:h.cond,night:h.night};
