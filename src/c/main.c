@@ -385,6 +385,21 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 // ==============================================================================
 
 // Callback triggered whenever the phone sends a chunk of data
+static int s_last_acked_part = 0;
+
+static void acknowledge_forecast_part(int number) {
+  DictionaryIterator *out = NULL;
+  AppMessageResult result = app_message_outbox_begin(&out);
+  if (result != APP_MSG_OK || !out) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "ACK %d outbox unavailable: %d", number, result);
+    return;
+  }
+  dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 100 + number);
+  result = app_message_outbox_send();
+  APP_LOG(result == APP_MSG_OK ? APP_LOG_LEVEL_INFO : APP_LOG_LEVEL_WARNING,
+          "ACK part %d: %d", number, result);
+}
+
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
   Tuple *part = dict_find(iterator, MESSAGE_KEY_TRANSFER_PART);
   Tuple *status = dict_find(iterator, MESSAGE_KEY_STATUS_TEXT);
@@ -400,7 +415,18 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     return;
   }
   int number = (int)part->value->int32;
+  if (number < 1 || number > 8) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast part %d", number);
+    return;
+  }
+  // Retry of an already accepted part, including the FINAL part.
+  if (number == s_last_acked_part && (number != 1 || s_pending_first)) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "Duplicate forecast part %d; re-ACK", number);
+    acknowledge_forecast_part(number);
+    return;
+  }
   if (number == 1) {
+    s_last_acked_part = 0;
     memset(s_pending_data, 0, sizeof(s_pending_data));
     memset(s_pending_uv, 0, sizeof(s_pending_uv));
     memset(s_pending_night, 0, sizeof(s_pending_night));
@@ -411,15 +437,11 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_pending_count = 0;
     s_pending_location[0] = '\0';
   } else if (!s_pending_first || number > 8 || (number != s_pending_next_part && number != s_pending_next_part - 1)) return;
-  // Repeated part is a retry after a lost acknowledgement; acknowledge it again.
-  if (number > 1 && number == s_pending_next_part - 1) {
-    DictionaryIterator *out;
-    if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-      dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 100 + number);
-      app_message_outbox_send();
-    }
+  if (number != 1 && number == s_pending_next_part - 1) {
+    acknowledge_forecast_part(number);
     return;
   }
+  APP_LOG(APP_LOG_LEVEL_INFO, "Receiving forecast part %d", number);
   Tuple *t = dict_read_first(iterator);
   while (t) {
     uint32_t key = t->key;
@@ -450,13 +472,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     t = dict_read_next(iterator);
   }
   int total = s_pending_count;
-  if (total < 1 || total > 48) return;
+  if (total < 1 || total > 48) { APP_LOG(APP_LOG_LEVEL_WARNING, "Invalid forecast count %d in part %d", total, number); return; }
   int start = (number - 1) * 6;
   int end = start + 6 < total ? start + 6 : total;
-  if (start >= total) return;
+  if (start >= total) { APP_LOG(APP_LOG_LEVEL_WARNING, "Part %d outside count %d", number, total); return; }
   for (int i = start; i < end; i++) {
     if (!s_pending_data[i][0][0] || !s_pending_data[i][1][0] ||
-        !s_pending_data[i][2][0] || !s_pending_data[i][3][0]) return;
+        !s_pending_data[i][2][0] || !s_pending_data[i][3][0]) { APP_LOG(APP_LOG_LEVEL_WARNING, "Missing data in part %d hour %d", number, i); return; }
   }
   for (int i = start; i < end; i++) {
     invalidate_icon(i);
@@ -492,11 +514,8 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   if (end == total) s_pending_first = false;
   update_icons_for_view();
   layer_mark_dirty(s_canvas_layer);
-  DictionaryIterator *out;
-  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 100 + number);
-    app_message_outbox_send();
-  }
+  s_last_acked_part = number;
+  acknowledge_forecast_part(number);
   if (end == total) show_status(s_cached ? "Cached forecast" : "Weather updated");
 }
 
