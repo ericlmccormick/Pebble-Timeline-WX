@@ -17,7 +17,8 @@ static GBitmap *s_icon_bitmaps[24];     // Pointers to the loaded image assets i
 static bool s_is_metric = false;        // Tracks user preference for Celsius/kmh vs Fahrenheit/mph
 
 // Navigation and Layout State
-static int s_scroll_offset = 0;         // Tracks the starting hour index (0-18) for the sliding view window
+static int s_scroll_offset = 0;
+static bool s_has_forecast = false;         // Tracks the starting hour index (0-18) for the sliding view window
 
 // Temporary Notification Banner State
 static char s_location_name[32] = "Retrieving weather..."; // Holds the city name or loading text
@@ -29,6 +30,12 @@ static AppTimer *s_banner_timer = NULL;                    // Timer handle for a
 // ==============================================================================
 
 // Loads only the icons currently visible on the screen to prevent RAM overflow
+static void invalidate_icon(int idx) {
+  if (s_icon_bitmaps[idx]) {
+    gbitmap_destroy(s_icon_bitmaps[idx]);
+    s_icon_bitmaps[idx] = NULL;
+  }
+}
 static void update_icons_for_view() {
   for(int i = 0; i < 24; i++) {
     // Check if the index falls within the currently visible 6-hour window
@@ -106,7 +113,7 @@ static void banner_timer_callback(void *data) {
 // Handles scrolling up through the timeline
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_scroll_offset > 0) {
-    s_scroll_offset -= 2;           // Shift the view window up by 2 hours
+    s_scroll_offset -= (s_scroll_offset == 19 ? 1 : 2);           // Shift the view window up by 2 hours
     update_icons_for_view();        // Reload memory assets for the new view
     layer_mark_dirty(s_canvas_layer); 
   }
@@ -114,15 +121,28 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 
 // Handles scrolling down through the timeline
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_scroll_offset < 18) {       // Prevent scrolling past the 24th hour (24 total - 6 visible)
-    s_scroll_offset += 2;           // Shift the view window down by 2 hours
+  if (s_scroll_offset < 19) {       // Prevent scrolling past the 24th hour (24 total - 6 visible)
+    s_scroll_offset += (s_scroll_offset == 18 ? 1 : 2);           // Shift the view window down by 2 hours
     update_icons_for_view();        // Reload memory assets for the new view
     layer_mark_dirty(s_canvas_layer);
   }
 }
 
 // Binds hardware buttons to click functions
+static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK && out) {
+    dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 1);
+    dict_write_end(out);
+    app_message_outbox_send();
+    snprintf(s_location_name, sizeof(s_location_name), "Refreshing weather...");
+    s_show_banner = true;
+    if (s_banner_timer) { app_timer_cancel(s_banner_timer); s_banner_timer = NULL; }
+    layer_mark_dirty(s_canvas_layer);
+  }
+}
 static void click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
   window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
 }
@@ -157,7 +177,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   }
 
   // Determine how many rows to draw based on banner visibility (to prevent overlapping)
-  int visible_rows = s_show_banner ? 5 : 6;
+  int visible_rows = s_show_banner ? 5 : 5;
   int bottom_margin = s_show_banner ? 20 : 0; // Reserves 20px at the bottom if banner is active
 
   // 5. Draw the Data Grid
@@ -237,7 +257,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, 24, 2, bounds.size.h - 24 - bottom_margin), 0, GCornerNone);
   
   // Calculate relative handle position based on offset
-  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 64 - bottom_margin)) / 18);
+  int scroll_handle_y = 24 + ((s_scroll_offset * (bounds.size.h - 54 - bottom_margin)) / 19);
   graphics_context_set_fill_color(ctx, GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
@@ -277,9 +297,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     } 
     // Parse Array Data (Offsets applied using Message Key Math)
     else if (key >= MESSAGE_KEY_IS_NIGHT && key < MESSAGE_KEY_IS_NIGHT + 24) {
-      s_is_night[key - MESSAGE_KEY_IS_NIGHT] = t->value->int32;
+      int idx = key - MESSAGE_KEY_IS_NIGHT;
+      if (s_is_night[idx] != t->value->int32) invalidate_icon(idx);
+      s_is_night[idx] = t->value->int32;
     } else if (key >= MESSAGE_KEY_COLUMN_COND && key < MESSAGE_KEY_COLUMN_COND + 24) {
-      s_conditions[key - MESSAGE_KEY_COLUMN_COND] = (int)t->value->int32;
+      int idx = key - MESSAGE_KEY_COLUMN_COND;
+      if (s_conditions[idx] != (int)t->value->int32) invalidate_icon(idx);
+      s_conditions[idx] = (int)t->value->int32;
     } else if (key >= MESSAGE_KEY_COLUMN_TIME && key < MESSAGE_KEY_COLUMN_TIME + 24) {
       snprintf(s_forecast_data[key - MESSAGE_KEY_COLUMN_TIME][0], 10, "%s", t->value->cstring);
     } else if (key >= MESSAGE_KEY_COLUMN_TEMP && key < MESSAGE_KEY_COLUMN_TEMP + 24) {
@@ -296,6 +320,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   }
   
   // Update UI and RAM buffers after processing the payload chunk
+  s_has_forecast = true;
   update_icons_for_view();
 
   // If the location payload arrived, begin the 3-second teardown timer
