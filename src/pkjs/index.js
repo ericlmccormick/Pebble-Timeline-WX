@@ -286,10 +286,17 @@ function sendWeatherChunks(chunks) {
 var awaitingPart = 0;
 var ackTimer = null;
 var activeTransfer = null;
+var transferGeneration = 0;
+var sendSequence = 0;
+var ACK_TIMEOUT_MS = 10000;
+var MAX_PART_RETRIES = 4;
+
 function drainTransfers() {
   if (transferBusy || !transferQueue.length) return;
   transferBusy = true;
   activeTransfer = transferQueue.shift();
+  transferGeneration++;
+  console.log('Forecast transfer starting: ' + activeTransfer.length + ' parts');
   sendTransferPart(0, 0);
 }
 function finishTransfer() {
@@ -298,27 +305,55 @@ function finishTransfer() {
   awaitingPart = 0;
   activeTransfer = null;
   transferBusy = false;
+  transferGeneration++;
   drainTransfers();
 }
 function sendTransferPart(index, attempt) {
   if (!activeTransfer) return;
-  if (index >= activeTransfer.length) { finishTransfer(); return; }
-  awaitingPart = index + 1;
+  if (index >= activeTransfer.length) {
+    console.log('Forecast transfer complete');
+    finishTransfer();
+    return;
+  }
+  var generation = transferGeneration;
+  var sequence = ++sendSequence;
+  var part = index + 1;
+  awaitingPart = part;
+  if (ackTimer) clearTimeout(ackTimer);
+  ackTimer = null;
+  console.log('Sending forecast part ' + part + '/' + activeTransfer.length + ' attempt ' + (attempt + 1));
+  // Arm the timer BEFORE sending: a watch ACK may arrive before the
+  // sendAppMessage success callback. Never let an older callback rearm it.
+  ackTimer = setTimeout(function() {
+    if (generation !== transferGeneration || sequence !== sendSequence || awaitingPart !== part) return;
+    ackTimer = null;
+    console.log('ACK timeout for part ' + part);
+    if (attempt < MAX_PART_RETRIES) sendTransferPart(index, attempt + 1);
+    else { showStatus('Forecast transfer timed out'); finishTransfer(); }
+  }, ACK_TIMEOUT_MS);
   Pebble.sendAppMessage(activeTransfer[index], function() {
-    if (ackTimer) clearTimeout(ackTimer);
-    ackTimer = setTimeout(function() {
-      if (awaitingPart !== index + 1) return;
-      if (attempt < 3) sendTransferPart(index, attempt + 1);
-      else { showStatus('Forecast transfer timed out'); finishTransfer(); }
-    }, 3500);
+    if (generation !== transferGeneration || sequence !== sendSequence) return;
+    console.log('Bluetooth accepted part ' + part + ', waiting for watch ACK');
   }, function(err) {
-    console.log('Part '+(index+1)+' failed: '+JSON.stringify(err));
-    if (attempt < 3) setTimeout(function(){sendTransferPart(index,attempt+1);},500);
-    else {showStatus('Watch transfer failed');finishTransfer();}
+    if (generation !== transferGeneration || sequence !== sendSequence || awaitingPart !== part) return;
+    console.log('Part ' + part + ' send failed: ' + JSON.stringify(err));
+    if (ackTimer) clearTimeout(ackTimer);
+    ackTimer = null;
+    if (attempt < MAX_PART_RETRIES) {
+      setTimeout(function() {
+        if (generation === transferGeneration && sequence === sendSequence && awaitingPart === part)
+          sendTransferPart(index, attempt + 1);
+      }, 1000);
+    } else { showStatus('Watch transfer failed'); finishTransfer(); }
   });
 }
 function acknowledgePart(part) {
-  if (!activeTransfer || part !== awaitingPart) return;
+  if (!activeTransfer) return;
+  if (part !== awaitingPart) {
+    console.log('Ignoring stale/unexpected ACK ' + part + ', waiting for ' + awaitingPart);
+    return;
+  }
+  console.log('Acknowledged forecast part ' + part + '/' + activeTransfer.length);
   if (ackTimer) clearTimeout(ackTimer);
   ackTimer = null;
   awaitingPart = 0;
