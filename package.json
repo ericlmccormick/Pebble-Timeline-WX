@@ -36,7 +36,9 @@
             "TRANSFER_PART",
             "TRANSFER_COUNT",
             "STATUS_TEXT",
-            "COLOR_MODE"
+            "COLOR_MODE",
+            "SUNRISE",
+            "SUNSET"
         ],
         "projectType": "native",
         "resources": {
