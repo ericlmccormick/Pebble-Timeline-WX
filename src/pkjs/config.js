@@ -24,6 +24,7 @@ module.exports = [
           { "label": "Knots (kt)", "value": "knots" }
         ]
       },
+      { "type": "toggle", "messageKey": "SHOW_GUSTS", "label": "Show wind gusts on center button", "defaultValue": false },
       {
         "type": "radiogroup",
         "messageKey": "TIME_FORMAT", // <-- Make sure this is here
