@@ -20,6 +20,9 @@ var transferBusy = false;
 var refreshQueued = false;
 var startupCacheFallback = false;
 var lastSentFingerprint = null;
+var lastCompletedFingerprint = null;
+var queuedFingerprint = null;
+var pendingRefreshForceLocation = false;
 var lastLocation = null;
 try { lastLocation = JSON.parse(localStorage.getItem('lastWeatherLocation')); } catch (e) { lastLocation = null; }
 var nextTransferId = (Date.now() % 2000000000);
@@ -154,7 +157,7 @@ function providerData(name,lat,lon,apiKey,done) {
   var base='lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
   if(name==='openmeteo') {
     httpJson('https://api.open-meteo.com/v1/forecast?latitude='+lat+'&longitude='+lon+
-      '&hourly=temperature_2m,dew_point_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,uv_index,is_day'+
+      '&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,uv_index,is_day'+
       '&daily=sunrise,sunset&timeformat=unixtime&timezone=auto&wind_speed_unit=ms&forecast_days=3',
       function(err,r){
         if(err){done(err);return;}
@@ -243,7 +246,10 @@ function validHourlyRows(raw, now) {
   return result;
 }
 function fetchWeather(forceLocation) {
-  if(requestInProgress){refreshQueued=true;return;}
+  forceLocation = forceLocation === true;
+  if (requestInProgress) { if (forceLocation) { refreshQueued = true; pendingRefreshForceLocation = true; } return; }
+  if (retryTimer && !forceLocation) { console.log('Refresh retry scheduled; skipping overlapping periodic request'); return; }
+  if (forceLocation && retryTimer) { clearTimeout(retryTimer); retryTimer = null; retryCount = 0; }
   requestInProgress=true;
   var s=currentSettings();
   var provider=setting(s,keys.WEATHER_PROVIDER,'WEATHER_PROVIDER','auto');
@@ -337,22 +343,32 @@ function completeForecast(hours, location, timeFormat, units, windUnit, gustsEna
   requestInProgress = false;
   retryCount = 0;
   startupCacheFallback = false;
-  if (refreshQueued) { refreshQueued = false; setTimeout(fetchWeather, 100); }
+  if (refreshQueued) {
+    var forcePending = pendingRefreshForceLocation;
+    refreshQueued = false;
+    pendingRefreshForceLocation = false;
+    setTimeout(function() { fetchWeather(forcePending); }, 100);
+  }
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   var savedAt = Date.now();
   hours.sunrise = sunrise;
   hours.sunset = sunset;
   localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:setting(currentSettings(), keys.LOCATION_MODE, 'LOCATION_MODE', 'gps'), locationQuery:String(setting(currentSettings(), keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim(), savedAt:savedAt}));
   var fingerprint = JSON.stringify({hours:hours,location:location,units:units,windUnit:windUnit,gustsEnabled:gustsEnabled,sunrise:sunrise,sunset:sunset});
-  if (fingerprint === lastSentFingerprint) { console.log('Forecast unchanged; skipping Bluetooth transfer'); return; }
-  lastSentFingerprint = fingerprint;
+  if (fingerprint === lastCompletedFingerprint ||
+      fingerprint === queuedFingerprint) {
+    console.log('Forecast unchanged or already queued; skipping Bluetooth transfer');
+    return;
+  }
+  queuedFingerprint = fingerprint;
   transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
 // Serialize whole forecast transactions. Interleaved cached/live transfers
 // otherwise overwrite the watch's pending first chunk.
 function sendWeatherChunks(chunks) {
+  chunks.forecastFingerprint = queuedFingerprint;
   transferQueue.push(chunks);
-  if (transferQueue.length > 3) transferQueue.splice(0, transferQueue.length - 2);
+  if (transferQueue.length > 2) transferQueue.splice(0, transferQueue.length - 1);
   drainTransfers();
 }
 var awaitingPart = 0;
@@ -384,6 +400,8 @@ function sendTransferPart(index, attempt) {
   if (!activeTransfer) return;
   if (index >= activeTransfer.length) {
     lastSuccessfulTransfer = activeTransfer[0][keys.TRANSFER_ID];
+    lastCompletedFingerprint = activeTransfer.forecastFingerprint || null;
+    if (lastCompletedFingerprint === queuedFingerprint) queuedFingerprint = null;
     console.log('Forecast transfer complete');
     finishTransfer();
     return;
@@ -402,7 +420,7 @@ function sendTransferPart(index, attempt) {
     ackTimer = null;
     console.log('ACK timeout for part ' + part);
     if (attempt < MAX_PART_RETRIES) sendTransferPart(index, attempt + 1);
-    else { showStatus('Forecast transfer timed out'); finishTransfer(); }
+    else { queuedFingerprint = null; showStatus('Forecast transfer timed out'); finishTransfer(); }
   }, ACK_TIMEOUT_MS);
   Pebble.sendAppMessage(activeTransfer[index], function() {
     if (generation !== transferGeneration || sequence !== sendSequence) return;
@@ -417,7 +435,7 @@ function sendTransferPart(index, attempt) {
         if (generation === transferGeneration && sequence === sendSequence && awaitingPart === part)
           sendTransferPart(index, attempt + 1);
       }, 1000);
-    } else { showStatus('Watch transfer failed'); finishTransfer(); }
+    } else { queuedFingerprint = null; showStatus('Watch transfer failed'); finishTransfer(); }
   });
 }
 function acknowledgePart(part, transferId) {
