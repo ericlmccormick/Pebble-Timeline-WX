@@ -387,7 +387,16 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   Tuple *part = dict_find(iterator, MESSAGE_KEY_TRANSFER_PART);
   Tuple *status = dict_find(iterator, MESSAGE_KEY_STATUS_TEXT);
   if (status) { show_status(status->value->cstring); return; }
-  if (!part) return;
+  if (!part) {
+    Tuple *theme = dict_find(iterator, MESSAGE_KEY_COLOR_MODE);
+    if (theme && theme->type == TUPLE_CSTRING) {
+      const char *mode = theme->value->cstring;
+      s_color_mode = strcmp(mode, "day") == 0 ? 1 : strcmp(mode, "night") == 0 ? 2 : 0;
+      s_last_auto_dark = is_dark_mode();
+      layer_mark_dirty(s_canvas_layer);
+    }
+    return;
+  }
   int number = (int)part->value->int32;
   if (number == 1) {
     memset(s_pending_data, 0, sizeof(s_pending_data));
