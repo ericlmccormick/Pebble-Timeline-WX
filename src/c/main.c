@@ -153,17 +153,7 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 // Binds hardware buttons to click functions
-static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_gust_enabled && s_has_forecast) {
-    int idx = s_scroll_offset + s_selected_hour;
-    if (idx >= s_forecast_count) idx = s_forecast_count - 1;
-    char message[48];
-    const char *unit = s_wind_unit == 1 ? "km/h" : s_wind_unit == 2 ? "m/s" : s_wind_unit == 3 ? "kt" : "mph";
-    snprintf(message, sizeof(message), "Gust %d %s", s_gust[idx], unit);
-    show_status(message);
-    s_selected_hour = (s_selected_hour + 1) % (s_forecast_count - s_scroll_offset < 6 ? s_forecast_count - s_scroll_offset : 6);
-    return;
-  }
+static void refresh_click_handler(ClickRecognizerRef recognizer, void *context) {
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK && out) {
     dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 1);
@@ -176,8 +166,24 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
     layer_mark_dirty(s_canvas_layer);
   }
 }
+static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_gust_enabled && s_has_forecast) {
+    int count = s_forecast_count - s_scroll_offset;
+    if (count > 6) count = 6;
+    if (count < 1) return;
+    int idx = s_scroll_offset + s_selected_hour % count;
+    char message[48];
+    const char *unit = s_wind_unit == 1 ? "km/h" : s_wind_unit == 2 ? "m/s" : s_wind_unit == 3 ? "kt" : "mph";
+    snprintf(message, sizeof(message), "%s: gust %d %s", s_forecast_data[idx][0], s_gust[idx], unit);
+    s_selected_hour = (s_selected_hour + 1) % count;
+    show_status(message);
+  } else {
+    refresh_click_handler(recognizer, context);
+  }
+}
 static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
+  window_long_click_subscribe(BUTTON_ID_SELECT, 700, refresh_click_handler, NULL);
   window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
 }
