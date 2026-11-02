@@ -462,17 +462,28 @@ static void store_complete_forecast(void) {
     .temp_unit = (uint8_t)s_temp_unit
   };
   snprintf(meta.location, sizeof(meta.location), "%s", s_location_name);
-  // A failed or interrupted write cannot be mistaken for a valid cache:
-  // rows are written first and the checksum-bearing manifest is written last.
+  // Compare against the stored blocks first: avoid unnecessary flash writes.
+  // Write the checksum-bearing manifest last so a partly updated cache is rejected.
+  uint8_t existing[120];
+  int changed_parts = 0;
   for (int i = 0; i < (s_forecast_count + 5) / 6; i++) {
+    int size = s_pending_packed_len[i];
+    int prior_size = persist_read_data(WEATHER_CACHE_PART_KEY + i, existing, sizeof(existing));
+    if (prior_size == size && memcmp(existing, s_pending_packed[i], size) == 0) continue;
     if (persist_write_data(WEATHER_CACHE_PART_KEY + i,
-                           s_pending_packed[i], s_pending_packed_len[i]) != s_pending_packed_len[i]) {
+                           s_pending_packed[i], size) != size) {
       APP_LOG(APP_LOG_LEVEL_WARNING, "Unable to persist forecast part %d", i);
       return;
     }
+    changed_parts++;
   }
-  if (persist_write_data(WEATHER_CACHE_META_KEY, &meta, sizeof(meta)) != sizeof(meta))
-    APP_LOG(APP_LOG_LEVEL_WARNING, "Unable to persist forecast metadata");
+  WeatherCacheMeta old_meta;
+  int old_size = persist_read_data(WEATHER_CACHE_META_KEY, &old_meta, sizeof(old_meta));
+  if (old_size != sizeof(old_meta) || memcmp(&old_meta, &meta, sizeof(meta)) != 0) {
+    if (persist_write_data(WEATHER_CACHE_META_KEY, &meta, sizeof(meta)) != sizeof(meta))
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Unable to persist forecast metadata");
+  }
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "Persisted %d changed weather parts", changed_parts);
 }
 
 static void restore_persisted_forecast(void) {
