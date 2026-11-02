@@ -47,6 +47,8 @@ function sendCachedWeather() {
     if ((cache.locationMode || 'gps') !== locMode || (cache.locationQuery || '') !== locQuery) return false;
     var hours = cache.hours.filter(function(h) { return h.dt >= Math.floor(Date.now()/1000) - 3600; });
     if (!hours.length) { showStatus('Forecast expired'); return false; }
+    hours.sunrise = cache.sunrise;
+    hours.sunset = cache.sunset;
     transmitHours(hours, cache.location, cache.savedAt, true, cache.gustsEnabled);
     return true;
   } catch(e) { console.log('Cache invalid: ' + e); return false; }
@@ -56,6 +58,7 @@ function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
   var settings = currentSettings(), units = settings[keys.UNITS] || 'imperial';
   var wind = windPreference(settings, units);
   c1[keys.COLOR_MODE] = settings[keys.COLOR_MODE] || 'auto';
+  if (hours.sunrise && hours.sunset) { c1[keys.SUNRISE] = hours.sunrise; c1[keys.SUNSET] = hours.sunset; }
   c1[keys.UNITS] = units;
   c1[keys.WIND_UNIT] = wind;
   c1[keys.FORECAST_TIMESTAMP] = Math.floor(savedAt / 1000);
@@ -113,6 +116,9 @@ function fetchWeather() {
         
         // Prepare two separate dictionaries to prevent Bluetooth MTU overflow
         var hoursData = [];
+        // Unix UTC timestamps from the forecast location, not phone clock.
+        var sunrise = json.current && json.current.sunrise;
+        var sunset = json.current && json.current.sunset;
         var gustsEnabled = settings[keys.SHOW_GUSTS] === true || settings[keys.SHOW_GUSTS] === 'true' || settings[keys.SHOW_GUSTS] === 1;
 
         // 3. Process the next 24 hours of forecast data
@@ -168,7 +174,7 @@ function fetchWeather() {
           }
         }
 
-        if (manualLabel) { completeForecast(hoursData, manualLabel, timeFormat, unitType, windUnit, gustsEnabled); return; }
+        if (manualLabel) { completeForecast(hoursData, manualLabel, timeFormat, unitType, windUnit, gustsEnabled, sunrise, sunset); return; }
         // Attempt secondary API call for precise local city name
         var geoUrl = 'https://api.openweathermap.org/geo/1.0/reverse?lat=' + lat + '&lon=' + lon + '&limit=1&appid=' + apiKey;
         var geoXhr = new XMLHttpRequest();
@@ -184,12 +190,12 @@ function fetchWeather() {
           }
           
           // Insert location into the first chunk and initiate transfer
-          completeForecast(hoursData, locationName, timeFormat, unitType, windUnit, gustsEnabled);
+          completeForecast(hoursData, locationName, timeFormat, unitType, windUnit, gustsEnabled, sunrise, sunset);
         };
 
         // If the secondary API drops or times out, immediately push the fallback to avoid a stuck UI
         geoXhr.onerror = function() {
-          completeForecast(hoursData, fallbackName, timeFormat, unitType, windUnit, gustsEnabled);
+          completeForecast(hoursData, fallbackName, timeFormat, unitType, windUnit, gustsEnabled, sunrise, sunset);
         };
 
         geoXhr.ontimeout = geoXhr.onerror;
@@ -236,12 +242,14 @@ function fetchWeather() {
 // ==============================================================================
 
 // Ensures the first 12 hours complete transmission before triggering the remaining 12
-function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled) {
+function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled, sunrise, sunset) {
   requestInProgress = false;
   retryCount = 0;
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   var savedAt = Date.now();
-  localStorage.setItem('lastForecast', JSON.stringify({hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:currentSettings()[keys.LOCATION_MODE] || 'gps', locationQuery:(currentSettings()[keys.LOCATION_QUERY] || '').trim(), savedAt:savedAt}));
+  hours.sunrise = sunrise;
+  hours.sunset = sunset;
+  localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:currentSettings()[keys.LOCATION_MODE] || 'gps', locationQuery:(currentSettings()[keys.LOCATION_QUERY] || '').trim(), savedAt:savedAt}));
   transmitHours(hours, location, savedAt, false, gustsEnabled);
 }
 function sendWeatherChunks(c1, c2, attempt) {
