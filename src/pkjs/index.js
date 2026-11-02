@@ -28,6 +28,13 @@ function sendCachedWeather() {
   try {
     var cache = JSON.parse(localStorage.getItem('lastForecast'));
     if (cache && cache.savedAt && Date.now() - cache.savedAt < 6 * 3600000) {
+      var settings = JSON.parse(localStorage.getItem('clay-settings')) || {};
+      var selectedUnits = settings[keys.UNITS] || 'imperial';
+      var selectedWind = settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (selectedUnits === 'metric' ? 'kmh' : 'mph');
+      var selectedTime = settings[keys.TIME_FORMAT] || '12h';
+      if (cache.chunk1[keys.UNITS] !== selectedUnits ||
+          cache.chunk1[keys.WIND_UNIT] !== selectedWind ||
+          cache.timeFormat !== selectedTime) return false;
       sendWeatherChunks(cache.chunk1, cache.chunk2);
       return true;
     }
@@ -44,6 +51,9 @@ function fetchWeather() {
   var apiKey = settings[keys.API_KEY] || settings['API_KEY'];
   var unitType = settings[keys.UNITS] || 'imperial';
   var timeFormat = settings[keys.TIME_FORMAT] || '12h';
+  // Wind speed is independent of the temperature unit preference.
+  var windUnit = settings[keys.WIND_UNIT] || settings['WIND_UNIT'] || (unitType === 'metric' ? 'kmh' : 'mph');
+  if (['mph', 'kmh', 'ms', 'knots'].indexOf(windUnit) < 0) windUnit = 'mph';
 
   if (!apiKey) { console.log('OpenWeather API key missing'); requestInProgress = false; return; }
 
@@ -68,6 +78,7 @@ function fetchWeather() {
         var chunk1 = {};
         var chunk2 = {};
         chunk1[keys.UNITS] = unitType;
+        chunk1[keys.WIND_UNIT] = windUnit;
 
         // 3. Process the next 24 hours of forecast data
         for(var i = 0; i < 24; i++) {
@@ -91,7 +102,12 @@ function fetchWeather() {
           // Populate the specific key-value pairs utilizing index offsets
           target[keys.COLUMN_TIME + i] = timeStr;
           target[keys.COLUMN_TEMP + i] = Math.round(h.temp) + tempSuffix;
-          target[keys.COLUMN_WIND + i] = Math.round(unitType === 'metric' ? h.wind_speed * 3.6 : h.wind_speed).toString();
+          // OpenWeather reports wind in mph for imperial and m/s for metric.
+          var windMs = unitType === 'metric' ? h.wind_speed : h.wind_speed * 0.44704;
+          var convertedWind = windUnit === 'ms' ? windMs :
+                              windUnit === 'kmh' ? windMs * 3.6 :
+                              windUnit === 'knots' ? windMs * 1.94384449 : windMs * 2.23693629;
+          target[keys.COLUMN_WIND + i] = Math.round(convertedWind).toString();
           target[keys.COLUMN_RAIN + i] = Math.round(h.pop * 100) + "%";
           target[keys.COLUMN_UV + i]   = Math.round(h.uvi);
           
@@ -128,7 +144,7 @@ function fetchWeather() {
           
           // Insert location into the first chunk and initiate transfer
           chunk1[keys.LOCATION_NAME] = locationName;
-          completeForecast(chunk1, chunk2);
+          completeForecast(chunk1, chunk2, timeFormat);
         };
 
         // If the secondary API drops or times out, immediately push the fallback to avoid a stuck UI
@@ -155,10 +171,10 @@ function fetchWeather() {
 // ==============================================================================
 
 // Ensures the first 12 hours complete transmission before triggering the remaining 12
-function completeForecast(c1, c2) {
+function completeForecast(c1, c2, timeFormat) {
   requestInProgress = false;
   retryCount = 0;
-  localStorage.setItem('lastForecast', JSON.stringify({chunk1:c1, chunk2:c2, savedAt:Date.now()}));
+  localStorage.setItem('lastForecast', JSON.stringify({chunk1:c1, chunk2:c2, timeFormat:timeFormat, savedAt:Date.now()}));
   sendWeatherChunks(c1, c2);
 }
 
