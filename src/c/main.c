@@ -177,6 +177,12 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
     snprintf(message, sizeof(message), "%s: gust %d %s", s_forecast_data[idx][0], s_gust[idx], unit);
     s_selected_hour = (s_selected_hour + 1) % count;
     show_status(message);
+  } else if (s_has_forecast && s_forecast_timestamp) {
+    int age = (int)((time(NULL) - s_forecast_timestamp) / 60);
+    if (age < 0) age = 0;
+    char message[48];
+    snprintf(message, sizeof(message), "%s%d min old", s_cached ? "Cached: " : "Updated: ", age);
+    show_status(message);
   } else {
     refresh_click_handler(recognizer, context);
   }
@@ -308,25 +314,6 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorDarkGray);  // Moving handle
   graphics_fill_rect(ctx, GRect(bounds.size.w - 2, scroll_handle_y, 2, 30), 0, GCornerNone);
 
-  // Forecast freshness and temporary status, without changing the six-row grid.
-  if (s_has_forecast && s_forecast_timestamp) {
-    int age_minutes = (int)((time(NULL) - s_forecast_timestamp) / 60);
-    if (age_minutes < 0) age_minutes = 0;
-    char age[40];
-    snprintf(age, sizeof(age), "%s%d min old", s_cached ? "Cached " : "", age_minutes);
-    graphics_context_set_text_color(ctx, GColorDarkGray);
-    graphics_draw_text(ctx, age, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                       GRect(5, bounds.size.h - 18, bounds.size.w - 20, 18),
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  }
-  if (s_status[0]) {
-    graphics_context_set_fill_color(ctx, GColorMidnightGreen);
-    graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
-    graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, s_status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                       GRect(6, bounds.size.h - 20, bounds.size.w - 12, 18),
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  }
   // 7. Render Temporary Location Banner (Bottom of screen)
   if (s_show_banner) {
     graphics_context_set_fill_color(ctx, GColorMidnightGreen);
@@ -335,6 +322,14 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_text_color(ctx, GColorWhite);
     graphics_draw_text(ctx, s_location_name, fonts_get_system_font(FONT_KEY_GOTHIC_14), 
                        GRect(6, bounds.size.h - 20, bounds.size.w - 12, 16), 
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+  if (s_status[0]) {
+    graphics_context_set_fill_color(ctx, GColorMidnightGreen);
+    graphics_fill_rect(ctx, GRect(0, bounds.size.h - 20, bounds.size.w, 20), 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, s_status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                       GRect(6, bounds.size.h - 20, bounds.size.w - 12, 18),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 }
