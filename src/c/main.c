@@ -410,7 +410,16 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_pending_next_part = 2;
     s_pending_count = 0;
     s_pending_location[0] = '\0';
-  } else if (!s_pending_first || number != s_pending_next_part || number > 4) return;
+  } else if (!s_pending_first || number > 8 || (number != s_pending_next_part && number != s_pending_next_part - 1)) return;
+  // Repeated part is a retry after a lost acknowledgement; acknowledge it again.
+  if (number > 1 && number == s_pending_next_part - 1) {
+    DictionaryIterator *out;
+    if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+      dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 100 + number);
+      app_message_outbox_send();
+    }
+    return;
+  }
   Tuple *t = dict_read_first(iterator);
   while (t) {
     uint32_t key = t->key;
@@ -440,20 +449,25 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     else if (key >= MESSAGE_KEY_COLUMN_GUST && key < MESSAGE_KEY_COLUMN_GUST + 48) s_pending_gust[key-MESSAGE_KEY_COLUMN_GUST] = atoi(t->value->cstring);
     t = dict_read_next(iterator);
   }
-  if (number < 4) { s_pending_next_part++; return; }
-  if (number == 4) {
-    s_pending_first = false;
-    if (s_pending_count < 1 || s_pending_count > 48) return;
-    for (int i=0;i<s_pending_count;i++) {
-      if (!s_pending_data[i][0][0]) return; // reject incomplete transfers
-    }
-    for (int i=0;i < 48;i++) invalidate_icon(i);
-    memcpy(s_forecast_data, s_pending_data, sizeof(s_forecast_data));
-    memcpy(s_uv_values, s_pending_uv, sizeof(s_uv_values));
-    memcpy(s_is_night, s_pending_night, sizeof(s_is_night));
-    memcpy(s_conditions, s_pending_conditions, sizeof(s_conditions));
-    memcpy(s_gust, s_pending_gust, sizeof(s_gust));
-    s_forecast_count = s_pending_count;
+  int total = s_pending_count;
+  if (total < 1 || total > 48) return;
+  int start = (number - 1) * 6;
+  int end = start + 6 < total ? start + 6 : total;
+  if (start >= total) return;
+  for (int i = start; i < end; i++) {
+    if (!s_pending_data[i][0][0] || !s_pending_data[i][1][0] ||
+        !s_pending_data[i][2][0] || !s_pending_data[i][3][0]) return;
+  }
+  for (int i = start; i < end; i++) {
+    invalidate_icon(i);
+    memcpy(s_forecast_data[i], s_pending_data[i], sizeof(s_forecast_data[i]));
+    s_uv_values[i] = s_pending_uv[i];
+    s_is_night[i] = s_pending_night[i];
+    s_conditions[i] = s_pending_conditions[i];
+    s_gust[i] = s_pending_gust[i];
+  }
+  s_forecast_count = end;
+  if (number == 1) {
     s_is_metric = s_pending_metric;
     s_wind_unit = s_pending_wind_unit;
     s_color_mode = s_pending_color_mode;
@@ -472,9 +486,18 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       if (s_banner_timer) app_timer_cancel(s_banner_timer);
       s_banner_timer = app_timer_register(3000, banner_timer_callback, NULL);
     }
-    show_status(s_cached ? "Cached forecast" : "Weather updated");
-    layer_mark_dirty(s_canvas_layer);
   }
+  s_has_forecast = true;
+  s_pending_next_part = number + 1;
+  if (end == total) s_pending_first = false;
+  update_icons_for_view();
+  layer_mark_dirty(s_canvas_layer);
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+    dict_write_uint8(out, MESSAGE_KEY_REFRESH_REQUEST, 100 + number);
+    app_message_outbox_send();
+  }
+  if (end == total) show_status(s_cached ? "Cached forecast" : "Weather updated");
 }
 
 // ==============================================================================
@@ -496,7 +519,7 @@ static void init() {
   window_set_window_handlers(s_main_window, (WindowHandlers) { .load = main_window_load });
   window_stack_push(s_main_window, true);
   
-  // Each message carries 12 hours; keep buffers small to preserve heap.
+  // Each message carries six hours; acknowledge validated chunks.
   app_message_register_inbox_received(inbox_received_callback);
   app_message_open(2048, 256);
   tick_timer_service_subscribe(MINUTE_UNIT, auto_theme_tick); 
