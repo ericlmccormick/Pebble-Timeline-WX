@@ -323,10 +323,12 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_text_color(ctx, foreground);
     GFont row_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
     GFont small_row_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+    GFont accessible_number_font = row_font;
 #if defined(PBL_SDK_4)
-    // Pebble OS 4+: honor the larger accessibility preference where possible.
-    if (preferred_content_size() == PreferredContentSizeExtraLarge)
-      row_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+    // Use the larger system font for short numeric values when the screen
+    // has enough room; retain normal font for long values to prevent clipping.
+    if (preferred_content_size() >= PreferredContentSizeLarge && row_height >= 34)
+      accessible_number_font = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 #endif
     graphics_draw_text(ctx, s_forecast_data[idx][0], row_font, 
                        GRect(x_pos[0], y + 1, 35, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
@@ -347,14 +349,16 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     else if (temp_val <= cold_threshold) temp_color = GColorBlue;
     graphics_context_set_text_color(ctx, temp_color);
     graphics_draw_text(ctx, s_forecast_data[idx][1],
-                       strlen(s_forecast_data[idx][1]) >= 4 ? small_row_font : row_font, 
+                       strlen(s_forecast_data[idx][1]) >= 4 ? small_row_font :
+                       strlen(s_forecast_data[idx][1]) <= 2 ? accessible_number_font : row_font, 
                        GRect(x_pos[2], y + 1, 40, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
     // Draw Wind Column (High Wind Warning Color)
     int wind_val = atoi(s_forecast_data[idx][2]);
     graphics_context_set_text_color(ctx, (wind_val >= (s_wind_unit == 1 ? 32 : s_wind_unit == 2 ? 9 : s_wind_unit == 3 ? 17 : 20)) ? GColorOrange : foreground);
     graphics_draw_text(ctx, s_forecast_data[idx][2],
-                       strlen(s_forecast_data[idx][2]) >= 4 ? small_row_font : row_font, 
+                       strlen(s_forecast_data[idx][2]) >= 4 ? small_row_font :
+                       strlen(s_forecast_data[idx][2]) <= 2 ? accessible_number_font : row_font, 
                        GRect(x_pos[3], y + 1, 38, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
     // Draw Rain Probability Pie Chart
