@@ -25,6 +25,9 @@ static int s_selected_hour = 0;
 static char s_pending_location[32] = "";
 static char s_status[48] = "";
 static AppTimer *s_status_timer = NULL;
+static time_t s_sunrise = 0, s_sunset = 0;
+static time_t s_pending_sunrise = 0, s_pending_sunset = 0;
+static bool s_last_auto_dark = false;
 static int s_color_mode = 0; // 0=auto, 1=day, 2=night
 static int s_pending_color_mode = 0;
 static int s_wind_unit = 0; // 0=mph, 1=km/h, 2=m/s, 3=knots
@@ -201,13 +204,44 @@ static void click_config_provider(void *context) {
 // ==============================================================================
 
 // The primary render loop called whenever the screen needs to update
+static bool is_dark_mode(void) {
+  if (s_color_mode == 1) return false;
+  if (s_color_mode == 2) return true;
+  time_t now = time(NULL);
+  if (s_sunrise > 0 && s_sunset > s_sunrise) {
+    // OpenWeather's sunrise/sunset describe the forecast location.
+    // Shift yesterday/tomorrow's boundaries by 24h if needed.
+    const time_t day = 86400;
+    time_t sunrise = s_sunrise, sunset = s_sunset;
+    if (now >= sunset) {
+      time_t days = (now - sunset) / day;
+      sunrise += days * day;
+      sunset += days * day;
+      if (now >= sunset) { sunrise += day; sunset += day; }
+    } else if (now < sunrise) {
+      time_t days = (sunrise - now + day - 1) / day;
+      sunrise -= days * day;
+      sunset -= days * day;
+    }
+    return !(now >= sunrise && now < sunset);
+  }
+  // Polar locations or missing astronomical data: fall back to local clock.
+  struct tm *local = localtime(&now);
+  return local && (local->tm_hour < 7 || local->tm_hour >= 19);
+}
+static void auto_theme_tick(struct tm *tick_time, TimeUnits units_changed) {
+  if (s_color_mode != 0) return;
+  bool dark = is_dark_mode();
+  if (dark != s_last_auto_dark) {
+    s_last_auto_dark = dark;
+    layer_mark_dirty(s_canvas_layer);
+  }
+}
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer); // Get screen dimensions
 
   // Automatic appearance follows the watch local clock, not the forecast location.
-  time_t now = time(NULL);
-  struct tm *local = localtime(&now);
-  bool dark = s_color_mode == 2 || (s_color_mode == 0 && local && (local->tm_hour < 7 || local->tm_hour >= 19));
+  bool dark = is_dark_mode();
   GColor foreground = dark ? GColorWhite : GColorBlack;
   GColor background = dark ? GColorBlack : GColorWhite;
   GColor header_color = dark ? GColorDarkGray : GColorLightGray;
@@ -378,6 +412,8 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       const char *unit = t->value->cstring;
       s_pending_wind_unit = strcmp(unit, "kmh") == 0 ? 1 : strcmp(unit, "ms") == 0 ? 2 : strcmp(unit, "knots") == 0 ? 3 : 0;
     }
+    else if (key == MESSAGE_KEY_SUNRISE) s_pending_sunrise = (time_t)t->value->int32;
+    else if (key == MESSAGE_KEY_SUNSET) s_pending_sunset = (time_t)t->value->int32;
     else if (key == MESSAGE_KEY_FORECAST_TIMESTAMP) s_pending_timestamp = (time_t)t->value->int32;
     else if (key == MESSAGE_KEY_FORECAST_CACHED) s_pending_cached = t->value->int32 != 0;
     else if (key == MESSAGE_KEY_GUSTS_ENABLED) s_pending_gust_enabled = t->value->int32 != 0;
@@ -408,6 +444,9 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_is_metric = s_pending_metric;
     s_wind_unit = s_pending_wind_unit;
     s_color_mode = s_pending_color_mode;
+    s_sunrise = s_pending_sunrise;
+    s_sunset = s_pending_sunset;
+    s_last_auto_dark = is_dark_mode();
     s_gust_enabled = s_pending_gust_enabled;
     s_forecast_timestamp = s_pending_timestamp;
     s_cached = s_pending_cached;
@@ -446,11 +485,13 @@ static void init() {
   
   // Register Bluetooth callbacks and open a large 8kb buffer for 24h payloads
   app_message_register_inbox_received(inbox_received_callback);
-  app_message_open(8192, 512); 
+  app_message_open(8192, 512);
+  tick_timer_service_subscribe(MINUTE_UNIT, auto_theme_tick); 
 }
 
 // App teardown
 static void deinit() {
+  tick_timer_service_unsubscribe();
   if (s_banner_timer) app_timer_cancel(s_banner_timer); // Clear lingering timers
   if (s_status_timer) app_timer_cancel(s_status_timer);
   for(int i = 0; i < 24; i++) { 
