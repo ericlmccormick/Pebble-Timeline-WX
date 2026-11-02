@@ -340,14 +340,16 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     }
 
     // Draw UV Safety Bar on the far right edge
-    GColor uv_color = GColorGreen;
     int uv = s_uv_values[idx];
-    if(uv > 2) uv_color = GColorYellow;
-    if(uv > 5) uv_color = GColorOrange;
-    if(uv > 7) uv_color = GColorRed;
-    if(uv > 10) uv_color = GColorPurple;
-    graphics_context_set_fill_color(ctx, uv_color);
-    graphics_fill_rect(ctx, GRect(bounds.size.w - 10, y + 1, 8, row_height - 2), 2, GCornersAll); // 8px wide, 2px rounded corners
+    if (uv >= 0) { // -1 means this provider did not supply UV data.
+      GColor uv_color = GColorGreen;
+      if(uv > 2) uv_color = GColorYellow;
+      if(uv > 5) uv_color = GColorOrange;
+      if(uv > 7) uv_color = GColorRed;
+      if(uv > 10) uv_color = GColorPurple;
+      graphics_context_set_fill_color(ctx, uv_color);
+      graphics_fill_rect(ctx, GRect(bounds.size.w - 10, y + 1, 8, row_height - 2), 2, GCornersAll);
+    } // 8px wide, 2px rounded corners
   }
 
   // 6. Draw Scroll Track Indicator
