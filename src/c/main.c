@@ -32,7 +32,9 @@ static bool s_last_auto_dark = false;
 static int s_color_mode = 0; // 0=auto, 1=day, 2=night
 static int s_pending_color_mode = 0;
 static int s_wind_unit = 0; // 0=mph, 1=km/h, 2=m/s, 3=knots
-static bool s_is_metric = false;        // Tracks user preference for Celsius/kmh vs Fahrenheit/mph
+static bool s_is_metric = false;
+static int s_temp_unit = 0; // 0=F, 1=C, 2=K, 3=R
+static int s_pending_temp_unit = 0;        // Tracks user preference for Celsius/kmh vs Fahrenheit/mph
 
 // Navigation and Layout State
 static int s_scroll_offset = 0;
@@ -252,7 +254,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   // 2. Define headers and column spacing
-  char *temp_label = s_is_metric ? "°C" : "°F";
+  char *temp_label = s_temp_unit == 1 ? "°C" : s_temp_unit == 2 ? "K" : s_temp_unit == 3 ? "°R" : "°F";
   char *wind_label = s_wind_unit == 1 ? "km/h" :
                      s_wind_unit == 2 ? "m/s" :
                      s_wind_unit == 3 ? "kt" : "MPH"; 
@@ -307,13 +309,11 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     // Draw Temperature Column (Semantic High/Low Colors)
     int temp_val = atoi(s_forecast_data[idx][1]);
     GColor temp_color = foreground;
-    if (!s_is_metric) { // Fahrenheit logic
-      if (temp_val >= 90) temp_color = GColorRed;
-      else if (temp_val <= 32) temp_color = GColorBlue;
-    } else {            // Celsius logic
-      if (temp_val >= 32) temp_color = GColorRed;
-      else if (temp_val <= 0) temp_color = GColorBlue;
-    }
+    // Color thresholds represent 90°F hot / 32°F freezing in all units.
+    int hot_threshold = s_temp_unit == 1 ? 32 : s_temp_unit == 2 ? 305 : s_temp_unit == 3 ? 550 : 90;
+    int cold_threshold = s_temp_unit == 1 ? 0 : s_temp_unit == 2 ? 273 : s_temp_unit == 3 ? 492 : 32;
+    if (temp_val >= hot_threshold) temp_color = GColorRed;
+    else if (temp_val <= cold_threshold) temp_color = GColorBlue;
     graphics_context_set_text_color(ctx, temp_color);
     graphics_draw_text(ctx, s_forecast_data[idx][1], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
                        GRect(x_pos[2], y + 1, 40, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
@@ -389,7 +389,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 // Callback triggered whenever the phone sends a chunk of data
 
 // A compact copy of each accepted part is kept for persistence.
-#define WEATHER_CACHE_MAGIC 0x57584332
+#define WEATHER_CACHE_MAGIC 0x57584333 // v3: numeric-only temperatures and unit metadata
 #define WEATHER_CACHE_META_KEY 7100
 #define WEATHER_CACHE_PART_KEY 7110
 static uint8_t s_pending_packed[8][120];
@@ -407,7 +407,7 @@ typedef struct {
   uint8_t metric;
   uint8_t gusts;
   uint8_t cached;
-  uint8_t reserved;
+  uint8_t temp_unit;
   char location[32];
 } WeatherCacheMeta;
 
@@ -449,7 +449,8 @@ static void store_complete_forecast(void) {
     .count = s_forecast_count, .timestamp = (int32_t)s_forecast_timestamp,
     .sunrise = (int32_t)s_sunrise, .sunset = (int32_t)s_sunset,
     .wind_unit = s_wind_unit, .color_mode = s_color_mode,
-    .metric = s_is_metric, .gusts = s_gust_enabled, .cached = s_cached
+    .metric = s_is_metric, .gusts = s_gust_enabled, .cached = s_cached,
+    .temp_unit = (uint8_t)s_temp_unit
   };
   snprintf(meta.location, sizeof(meta.location), "%s", s_location_name);
   // A failed or interrupted write cannot be mistaken for a valid cache:
@@ -497,6 +498,7 @@ static void restore_persisted_forecast(void) {
   s_wind_unit = meta.wind_unit;
   s_color_mode = meta.color_mode;
   s_is_metric = meta.metric != 0;
+  s_temp_unit = meta.temp_unit <= 3 ? meta.temp_unit : 0;
   s_gust_enabled = meta.gusts != 0;
   s_cached = true;
   s_has_forecast = true;
@@ -577,6 +579,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_pending_first = true;
     s_pending_next_part = 2;
     s_pending_count = 0;
+    s_pending_temp_unit = 0;
     s_pending_location[0] = '\0';
     memset(s_pending_packed_len, 0, sizeof(s_pending_packed_len));
   } else if (!s_pending_first || transfer_id != s_pending_transfer_id || (number != s_pending_next_part && number != s_pending_next_part - 1)) return;
@@ -594,6 +597,10 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       s_pending_color_mode = strcmp(mode, "day") == 0 ? 1 : strcmp(mode, "night") == 0 ? 2 : 0;
     }
     else if (key == MESSAGE_KEY_UNITS) s_pending_metric = strcmp(t->value->cstring, "metric") == 0;
+    else if (key == MESSAGE_KEY_TEMP_UNIT && t->type == TUPLE_CSTRING) {
+      const char *unit = t->value->cstring;
+      s_pending_temp_unit = strcmp(unit, "C") == 0 ? 1 : strcmp(unit, "K") == 0 ? 2 : strcmp(unit, "R") == 0 ? 3 : 0;
+    }
     else if (key == MESSAGE_KEY_WIND_UNIT) {
       const char *unit = t->value->cstring;
       s_pending_wind_unit = strcmp(unit, "kmh") == 0 ? 1 : strcmp(unit, "ms") == 0 ? 2 : strcmp(unit, "knots") == 0 ? 3 : 0;
@@ -652,6 +659,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
     s_forecast_count = total;
     s_is_metric = s_pending_metric;
+    s_temp_unit = s_pending_temp_unit;
     s_wind_unit = s_pending_wind_unit;
     s_color_mode = s_pending_color_mode;
     s_sunrise = s_pending_sunrise;
