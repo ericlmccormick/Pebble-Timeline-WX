@@ -177,7 +177,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   }
 
   // Determine how many rows to draw based on banner visibility (to prevent overlapping)
-  int visible_rows = s_show_banner ? 5 : 5;
+  int visible_rows = 5;
   int bottom_margin = s_show_banner ? 20 : 0; // Reserves 20px at the bottom if banner is active
 
   // 5. Draw the Data Grid
@@ -222,7 +222,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 
     // Draw Wind Column (High Wind Warning Color)
     int wind_val = atoi(s_forecast_data[idx][2]);
-    graphics_context_set_text_color(ctx, (wind_val >= 20) ? GColorOrange : GColorBlack);
+    graphics_context_set_text_color(ctx, (wind_val >= (s_is_metric ? 32 : 20)) ? GColorOrange : GColorBlack);
     graphics_draw_text(ctx, s_forecast_data[idx][2], fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
                        GRect(x_pos[3], y + 2, 40, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
