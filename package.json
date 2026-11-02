@@ -45,7 +45,9 @@
       "LOCATION_QUERY",
       "REFRESH_INTERVAL",
       "TRANSFER_ID",
-      "FORECAST_BLOB"
+      "FORECAST_BLOB",
+      "MESSAGE_POLICY",
+      "STATUS_LEVEL"
     ],
     "projectType": "native",
     "resources": {
