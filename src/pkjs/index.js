@@ -302,7 +302,9 @@ function applyWeatherPlusEnvelope(envelope) {
   var windSymbol=weatherPlusUnit(props,'hourly_wind_speed');
   var windUnit=/knots|kt/i.test(windSymbol)?'knots':
     /km/i.test(windSymbol)?'kmh':/mph/i.test(windSymbol)?'mph':'ms';
-  var clock=weatherPlusClock ||
+  var configuredClock=weatherPlusText(props.time_format);
+  var clock=(configuredClock==='12h'||configuredClock==='24h'?configuredClock:null) ||
+    weatherPlusClock ||
     setting(currentSettings(),keys.TIME_FORMAT,'TIME_FORMAT','12h');
   var offsetMinutes=weatherPlusNumber(props.utc_offset);
   var sunrise=weatherPlusTimestamp(props.sunrise);
@@ -363,7 +365,7 @@ function startWeatherPlus() {
   try {
     weatherPlusSubscription=Pebble.subscribeToSource({
       category:'weather',item:'location',plugin:WEATHER_PLUS_UUID,
-      properties:['name','provider','hourly_temperature','hourly_wind_speed',
+      properties:['name','provider','time_format','hourly_temperature','hourly_wind_speed',
         'hourly_wind_gust','hourly_precipitation','hourly_uv_index',
         'hourly_weather_code','hourly_condition_code','hourly_is_day',
         'utc_offset','sunrise','sunset','last_fetched_at','updated_at',
