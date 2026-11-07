@@ -71,3 +71,23 @@ jobs:
           gh release upload dev-latest direct-download/timeline-wx.pbw --clobber
           echo "### Direct PBW download" >> "$GITHUB_STEP_SUMMARY"
           echo "[Download timeline-wx.pbw](https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/timeline-wx.pbw)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish numbered v2.5.0 release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" != "2.5.0" ]]; then
+            echo "Skipping numbered release for development version $VERSION"
+            exit 0
+          fi
+          TAG="v$VERSION"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" \\
+              --title "Timeline WX $VERSION" \\
+              --notes "Timeline WX $VERSION: Weather+ plugin integration (default for new installs), enhanced source guidance, local weather alert support, synchronized watch/phone preferences, Next Up-style in-app settings menu, and forecast last-updated status. Existing provider preferences are retained."
+          fi
+          gh release upload "$TAG" direct-download/timeline-wx.pbw --clobber
+          echo "[Download versioned PBW](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/timeline-wx.pbw)" >> "$GITHUB_STEP_SUMMARY"
