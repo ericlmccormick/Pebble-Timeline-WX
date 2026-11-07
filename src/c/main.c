@@ -270,8 +270,8 @@ static void update_refresh_subtitle(void) {
   }
   char when_text[32];
   // Actual weather retrieval timestamp, not when the UI was opened.
-  strftime(when_text,sizeof(when_text),"%b %d %I:%M%p",when);
-  snprintf(s_refresh_subtitle,sizeof(s_refresh_subtitle),"Updated %s",when_text);
+  strftime(when_text,sizeof(when_text),"%m/%d %I:%M%p",when);
+  snprintf(s_refresh_subtitle,sizeof(s_refresh_subtitle),"Last: %s",when_text);
 }
 static void update_settings_subtitles(void) {
   update_refresh_subtitle();
@@ -297,7 +297,7 @@ static void settings_row_draw(GContext *ctx,const Layer *layer,
   }
   menu_cell_basic_draw(ctx,layer,SETTINGS_NAMES[row],settings_value(row),NULL);
 }
-static uint16_t settings_row_height(MenuLayer *menu,MenuIndex *index,
+static int16_t settings_row_height(MenuLayer *menu,MenuIndex *index,
                                    void *context) {
   return 52;
 }
