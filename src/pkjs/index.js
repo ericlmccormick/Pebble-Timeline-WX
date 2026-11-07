@@ -321,7 +321,7 @@ function applyWeatherPlusEnvelope(envelope) {
       rain:pp==null?'--':String(Math.round(Math.max(0,Math.min(100,pp))))+'%',
       uv:uvs[i]==null?-1:Math.round(Number(uvs[i])),
       cond:weatherPlusCondition(conditions[i],codes[i]),
-      night:isDays[i] == null ? (sunrise && sunset && dt<sunrise||dt>=sunset?1:0) :
+      night:isDays[i] == null ? ((sunrise && sunset && (dt<sunrise||dt>=sunset))?1:0) :
         (Number(isDays[i])?0:1)});
   }
   if(hours.length !== 48){ weatherPlusFallback('forecast has less than 48 usable hours');return;}
@@ -707,12 +707,16 @@ function acknowledgePart(part, transferId) {
 // Triggers immediately when the watch app boots up
 Pebble.addEventListener('ready', function() {
   sendThemeSetting();
-  // Fetch fresh data first. Only send the cached forecast if refresh ultimately fails.
   startupCacheFallback = true;
-  fetchWeather();
+  startWeatherClockPreference();
+  chooseWeatherSource();
+  // Weather+ updates its subscriptions automatically; only legacy sources
+  // need local polling. Retain a 15-minute minimum for the fallback engine.
   var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
   REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
-  refreshTimer=setInterval(fetchWeather,REFRESH_MS);
+  refreshTimer=setInterval(function() {
+    if (!weatherPlusInstalled || !weatherPlusHasData) fetchWeather();
+  },REFRESH_MS);
 });
 Pebble.addEventListener('appmessage', function(e) {
   var payload = e && e.payload;
@@ -731,11 +735,43 @@ Pebble.addEventListener('appmessage', function(e) {
     if (rawId === undefined) rawId = payload[String(keys.TRANSFER_ID)];
     acknowledgePart(request - 100, Number(rawId));
   }
-  else if (request === 1) fetchWeather(true);
+  else if (request === 1) {
+    if(weatherPlusInstalled && typeof Pebble.invokeAction==='function') {
+      Pebble.invokeAction({plugin:WEATHER_PLUS_UUID,action:'force_refresh',args:{}})
+        .then(function(result){
+          if(!result || result.ok===false)
+            weatherPlusFallback('Weather+ refresh action failed');
+        }).catch(function(e){weatherPlusFallback('Weather+ refresh action: '+e);});
+    } else fetchWeather(true);
+  }
   else console.log('Unknown watch request: ' + request);
 });
 
 // Triggers when the user closes the Clay Settings menu on their phone
 Pebble.addEventListener('webviewclosed', function(e) {
-  if (e && e.response) { retryCount=0; sendThemeSetting(); if(refreshTimer)clearInterval(refreshTimer); var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30)); REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000; refreshTimer=setInterval(fetchWeather,REFRESH_MS); fetchWeather(); } // Refresh data with new user settings
+  if (!e || !e.response || e.response==='CANCELLED') return;
+  var updates={};
+  try{updates=clay.getSettings(e.response)||{};}catch(ex){
+    console.log('Could not parse Clay settings: '+ex);return;
+  }
+  var merged=currentSettings();
+  Object.keys(updates).forEach(function(k){merged[k]=updates[k];});
+  try{localStorage.setItem('clay-settings',JSON.stringify(merged));}catch(ex){}
+  Pebble.sendAppMessage(updates,null,function(err){
+    console.log('Could not send display settings: '+JSON.stringify(err));
+  });
+  retryCount=0;
+  sendThemeSetting();
+  if(refreshTimer)clearInterval(refreshTimer);
+  var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
+  REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
+  refreshTimer=setInterval(function(){
+    if (!weatherPlusInstalled || !weatherPlusHasData) fetchWeather();
+  },REFRESH_MS);
+  detectWeatherPlus(function(installed) {
+    if(installed!==weatherPlusInstalled){weatherPlusInstalled=installed;chooseWeatherSource();}
+    else if(installed) {
+      if(weatherPlusLastEnvelope) applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
+    } else fetchWeather();
+  });
 });
