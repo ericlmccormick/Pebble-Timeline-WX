@@ -30,6 +30,14 @@ static bool s_status_critical = false;
 static bool s_critical_only = false;
 #define WEATHER_CONTROLS_HINT_KEY 7199
 #define WEATHER_MESSAGE_POLICY_KEY 7198
+#define WEATHER_TIME_FORMAT_KEY 7197
+#define WEATHER_GUST_SETTING_KEY 7196
+#define WEATHER_APPEARANCE_KEY 7195
+static bool s_clock_24 = false;
+static Window *s_settings_window = NULL;
+static SimpleMenuLayer *s_settings_menu = NULL;
+static SimpleMenuItem s_settings_items[5];
+static SimpleMenuSection s_settings_sections[1];
 #define NOTIFICATION_HEIGHT 20
 static AppTimer *s_status_timer = NULL;
 static AppTimer *s_slide_timer = NULL;
@@ -209,6 +217,93 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
   }
 }
 
+// Watch-side settings. Long SELECT opens this native Pebble menu;
+// refresh remains available as the final menu item.
+static void send_watch_preference(uint32_t key, const char *value) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) return;
+  dict_write_cstring(out, key, value);
+  dict_write_end(out);
+  app_message_outbox_send();
+}
+static void update_settings_subtitles(void) {
+  s_settings_items[0].subtitle = s_clock_24 ? "24-hour" : "12-hour";
+  s_settings_items[1].subtitle = s_color_mode == 1 ? "Day" :
+      s_color_mode == 2 ? "Night" : "Auto";
+  s_settings_items[2].subtitle = s_gust_enabled ? "On" : "Off";
+  s_settings_items[3].subtitle = s_critical_only ? "Critical only" : "All";
+  if (s_settings_menu)
+    layer_mark_dirty(simple_menu_layer_get_layer(s_settings_menu));
+}
+static void settings_item_selected(int index, void *context) {
+  switch (index) {
+    case 0:
+      s_clock_24 = !s_clock_24;
+      persist_write_bool(WEATHER_TIME_FORMAT_KEY, s_clock_24);
+      send_watch_preference(MESSAGE_KEY_TIME_FORMAT, s_clock_24 ? "24h" : "12h");
+      break;
+    case 1:
+      s_color_mode = (s_color_mode + 1) % 3;
+      persist_write_int(WEATHER_APPEARANCE_KEY, s_color_mode);
+      s_last_auto_dark = is_dark_mode();
+      layer_mark_dirty(s_canvas_layer);
+      send_watch_preference(MESSAGE_KEY_COLOR_MODE,
+          s_color_mode == 1 ? "day" : s_color_mode == 2 ? "night" : "auto");
+      break;
+    case 2:
+      s_gust_enabled = !s_gust_enabled;
+      persist_write_bool(WEATHER_GUST_SETTING_KEY, s_gust_enabled);
+      send_watch_preference(MESSAGE_KEY_SHOW_GUSTS, s_gust_enabled ? "1" : "0");
+      break;
+    case 3:
+      set_notification_policy(!s_critical_only);
+      send_watch_preference(MESSAGE_KEY_MESSAGE_POLICY,
+          s_critical_only ? "critical" : "all");
+      break;
+    case 4:
+      refresh_click_handler(NULL, NULL);
+      if (s_settings_window) window_stack_pop(true);
+      return;
+  }
+  update_settings_subtitles();
+}
+static void settings_window_unload(Window *window) {
+  if (s_settings_menu) {
+    simple_menu_layer_destroy(s_settings_menu);
+    s_settings_menu = NULL;
+  }
+  s_settings_window = NULL;
+  window_destroy(window);
+}
+static void settings_window_load(Window *window) {
+  s_settings_items[0] = (SimpleMenuItem){.title="Time format",
+      .callback=settings_item_selected};
+  s_settings_items[1] = (SimpleMenuItem){.title="Appearance",
+      .callback=settings_item_selected};
+  s_settings_items[2] = (SimpleMenuItem){.title="Show gusts",
+      .callback=settings_item_selected};
+  s_settings_items[3] = (SimpleMenuItem){.title="Notifications",
+      .callback=settings_item_selected};
+  s_settings_items[4] = (SimpleMenuItem){.title="Refresh weather",
+      .subtitle="Request latest forecast",.callback=settings_item_selected};
+  s_settings_sections[0] = (SimpleMenuSection){
+      .title="Timeline WX settings",.num_items=5,.items=s_settings_items};
+  s_settings_menu = simple_menu_layer_create(
+      layer_get_bounds(window_get_root_layer(window)),window,
+      s_settings_sections,1,NULL);
+  layer_add_child(window_get_root_layer(window),
+      simple_menu_layer_get_layer(s_settings_menu));
+  update_settings_subtitles();
+}
+static void settings_open_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_settings_window) return;
+  s_settings_window = window_create();
+  window_set_window_handlers(s_settings_window,
+      (WindowHandlers){.load=settings_window_load,
+                       .unload=settings_window_unload});
+  window_stack_push(s_settings_window,true);
+}
+
 // Binds hardware buttons to click functions
 static void refresh_click_handler(ClickRecognizerRef recognizer, void *context) {
   DictionaryIterator *out;
@@ -246,7 +341,7 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
-  window_long_click_subscribe(BUTTON_ID_SELECT, 700, refresh_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_SELECT, 700, settings_open_handler, NULL);
   window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
 }
@@ -619,13 +714,28 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     Tuple *policy = dict_find(iterator, MESSAGE_KEY_MESSAGE_POLICY);
     if (policy && policy->type == TUPLE_CSTRING)
       set_notification_policy(strcmp(policy->value->cstring, "critical") == 0);
+    Tuple *clock = dict_find(iterator, MESSAGE_KEY_TIME_FORMAT);
+    if (clock && clock->type == TUPLE_CSTRING) {
+      s_clock_24 = strcmp(clock->value->cstring, "24h") == 0;
+      persist_write_bool(WEATHER_TIME_FORMAT_KEY, s_clock_24);
+    }
+    Tuple *gust = dict_find(iterator, MESSAGE_KEY_SHOW_GUSTS);
+    if (gust) {
+      s_gust_enabled = gust->type == TUPLE_CSTRING ?
+          (strcmp(gust->value->cstring,"1")==0 ||
+           strcmp(gust->value->cstring,"true")==0) :
+          gust->value->int32 != 0;
+      persist_write_bool(WEATHER_GUST_SETTING_KEY,s_gust_enabled);
+    }
     Tuple *theme = dict_find(iterator, MESSAGE_KEY_COLOR_MODE);
     if (theme && theme->type == TUPLE_CSTRING) {
       const char *mode = theme->value->cstring;
       s_color_mode = strcmp(mode, "day") == 0 ? 1 : strcmp(mode, "night") == 0 ? 2 : 0;
       s_last_auto_dark = is_dark_mode();
+      persist_write_int(WEATHER_APPEARANCE_KEY,s_color_mode);
       layer_mark_dirty(s_canvas_layer);
     }
+    if(s_settings_menu)update_settings_subtitles();
     return;
   }
   Tuple *id_tuple = dict_find(iterator, MESSAGE_KEY_TRANSFER_ID);
@@ -761,6 +871,12 @@ static void main_window_load(Window *window) {
 
 // App startup
 static void init() {
+  if (persist_exists(WEATHER_TIME_FORMAT_KEY))
+    s_clock_24 = persist_read_bool(WEATHER_TIME_FORMAT_KEY);
+  if (persist_exists(WEATHER_GUST_SETTING_KEY))
+    s_gust_enabled = persist_read_bool(WEATHER_GUST_SETTING_KEY);
+  if (persist_exists(WEATHER_APPEARANCE_KEY))
+    s_color_mode = persist_read_int(WEATHER_APPEARANCE_KEY);
   s_main_window = window_create();
   window_set_click_config_provider(s_main_window, click_config_provider);
   window_set_window_handlers(s_main_window, (WindowHandlers) { .load = main_window_load });
@@ -769,7 +885,7 @@ static void init() {
   if (persist_exists(WEATHER_MESSAGE_POLICY_KEY))
     s_critical_only = persist_read_bool(WEATHER_MESSAGE_POLICY_KEY);
   if (!persist_exists(WEATHER_CONTROLS_HINT_KEY)) {
-    show_status("Hold SELECT to refresh");
+    show_status("Hold SELECT for settings");
     persist_write_bool(WEATHER_CONTROLS_HINT_KEY, true);
   }
 
