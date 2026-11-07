@@ -18,26 +18,6 @@ var weatherPlusLastEnvelope = null;
 var lastWeatherAlert = null;
 var pluginFallbackTimer = null;
 var weatherPlusStarting = false;
-function pluginConfigPage(installed) {
-  var common = [];
-  clayConfig.forEach(function(section) {
-    if(section.type === 'section' && section.items) section.items.forEach(function(item) {
-      if(['TIME_FORMAT','COLOR_MODE','SHOW_GUSTS','MESSAGE_POLICY'].indexOf(item.messageKey) >= 0)
-        common.push(item);
-    });
-  });
-  if (installed) {
-    return [
-      {type:'heading',defaultValue:'Timeline WX — Weather+'},
-      {type:'text',defaultValue:'Weather+ is installed. Configure weather source, location, measurement units and local alerts in the <b>Weather+ plugin settings</b>. Weather+ automatically serves cached data for 15 minutes, then refreshes on the next request.'},
-      {type:'section',items:[{type:'heading',defaultValue:'Watch display'},common[0],common[1],common[2],common[3]]},
-      {type:'submit',defaultValue:'Save'}
-    ];
-  }
-  var copy = clayConfig.slice();
-  copy.splice(1,0,{type:'text',defaultValue:'<b>Weather+ recommended:</b> Install Weather+ to get shared weather settings and local weather warnings. Without Weather+, advanced features such as local warnings are not available. Existing weather providers still work.'});
-  return copy;
-}
 function weatherPlusIsInstalled() {
   // Pebble's enumeratePlugins() is synchronous. Never defer Pebble.openURL()
   // beyond the showConfiguration event; Android can otherwise open a blank page.
@@ -60,20 +40,8 @@ function weatherPlusIsInstalled() {
 function detectWeatherPlus(done) {
   done(weatherPlusIsInstalled());
 }
-// The order matters: this handler runs BEFORE Clay's built-in showConfiguration
-// handler, so Clay sees the correct dynamic config and opens its page normally.
-Pebble.addEventListener('showConfiguration',function(){
-  var installed=weatherPlusIsInstalled();
-  weatherPlusInstalled=installed;
-  try {
-    clay.config=pluginConfigPage(installed);
-  } catch(e) {
-    console.log('Weather+ settings selection failed: '+e);
-    clay.config=clayConfig;
-  }
-});
-// Use Clay's supported automatic configuration and webviewclosed handlers.
-// Manual Pebble.openURL on the new Android Pebble app can leave a blank WebView.
+// Always expose the complete, static Timeline WX settings page.
+// Plugin detection remains independent of Clay's configuration UI.
 clay = new Clay(clayConfig);
               // Initialize settings
 
