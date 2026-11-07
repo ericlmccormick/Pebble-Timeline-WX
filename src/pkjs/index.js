@@ -219,6 +219,185 @@ function httpJson(url, done, headers) {
   if(headers)Object.keys(headers).forEach(function(k){try{xhr.setRequestHeader(k,headers[k]);}catch(e){}});
   xhr.send();
 }
+
+function weatherPlusProperty(props,name) { return props && props[name] || null; }
+function weatherPlusSeries(props,name) {
+  var p=weatherPlusProperty(props,name);
+  return p && p.series || null;
+}
+function weatherPlusValues(props,name) {
+  var series=weatherPlusSeries(props,name);
+  if(!series) return [];
+  var v=series.numericValue || series.longText || series.timestamp;
+  return v && v.values || [];
+}
+function weatherPlusUnit(props,name) {
+  var series=weatherPlusSeries(props,name);
+  return series && series.numericValue && series.numericValue.unit || '';
+}
+function weatherPlusNumber(p) {
+  return p && p.numericValue && p.numericValue.value != null ?
+    Number(p.numericValue.value) : null;
+}
+function weatherPlusTimestamp(p) {
+  return p && p.timestamp && p.timestamp.value != null ?
+    Number(p.timestamp.value) : null;
+}
+function weatherPlusText(p) {
+  return p && (p.shortText && p.shortText.text ||
+    p.longText && p.longText.text) || '';
+}
+function weatherPlusCondition(value,raw) {
+  var n=Number(raw);
+  if (isFinite(n) && raw != null && raw !== '') {
+    if (n > 100) return n;  // Some providers already use OpenWeather codes.
+    return wmoCode(n);      // WMO 0-99.
+  }
+  var c=String(value || '').toLowerCase();
+  if(c==='sun'||c==='clear') return 800;
+  if(c==='partly_cloudy') return 801;
+  if(c==='cloudy'||c==='overcast') return 803;
+  if(c==='light_snow') return 600;
+  if(c==='heavy_snow') return 602;
+  if(c==='light_rain') return 500;
+  if(c==='heavy_rain') return 502;
+  if(c==='thunderstorm') return 200;
+  return textCode(c);
+}
+function weatherPlusFallback(reason) {
+  console.log('Weather+ unavailable, using original providers: ' + reason);
+  if (!weatherPlusHasData && !requestInProgress) fetchWeather();
+}
+function applyWeatherPlusEnvelope(envelope) {
+  if (!envelope || String(envelope.pluginUuid||'').toLowerCase() !== WEATHER_PLUS_UUID) {
+    weatherPlusFallback('a different plugin answered weather/location');
+    return;
+  }
+  var instances = envelope.instances || [];
+  if (!instances.length) { weatherPlusFallback('no locations'); return; }
+  var props=instances[0].properties || {};
+  var ts=weatherPlusSeries(props,'hourly_temperature');
+  var temps=weatherPlusValues(props,'hourly_temperature');
+  var winds=weatherPlusValues(props,'hourly_wind_speed');
+  if (!ts || !isFinite(ts.start) || !isFinite(ts.stepSec) ||
+      ts.stepSec !== 3600 || temps.length < 48 || winds.length < 48) {
+    weatherPlusFallback('incomplete hourly forecast');
+    return;
+  }
+  var gusts=weatherPlusValues(props,'hourly_wind_gust');
+  var pops=weatherPlusValues(props,'hourly_precipitation');
+  var uvs=weatherPlusValues(props,'hourly_uv_index');
+  var codes=weatherPlusValues(props,'hourly_weather_code');
+  var conditions=weatherPlusValues(props,'hourly_condition_code');
+  var isDays=weatherPlusValues(props,'hourly_is_day');
+  var tempSymbol=weatherPlusUnit(props,'hourly_temperature');
+  var temperatureUnit=tempSymbol.indexOf('F')>=0?'F':
+    tempSymbol.indexOf('K')>=0?'K':tempSymbol.indexOf('R')>=0?'R':'C';
+  var windSymbol=weatherPlusUnit(props,'hourly_wind_speed');
+  var windUnit=/knots|kt/i.test(windSymbol)?'knots':
+    /km/i.test(windSymbol)?'kmh':/mph/i.test(windSymbol)?'mph':'ms';
+  var clock=weatherPlusClock ||
+    setting(currentSettings(),keys.TIME_FORMAT,'TIME_FORMAT','12h');
+  var offsetMinutes=weatherPlusNumber(props.utc_offset);
+  var sunrise=weatherPlusTimestamp(props.sunrise);
+  var sunset=weatherPlusTimestamp(props.sunset);
+  var hours=[];
+  var now=Math.floor(Date.now()/1000);
+  for(var i=0;i<48;i++) {
+    var dt=Number(ts.start)+i*3600;
+    if (dt < now-3600 || dt > now+49*3600 || temps[i]==null || winds[i]==null ||
+      !isFinite(temps[i]) || !isFinite(winds[i])) break;
+    var hour=offsetMinutes!=null && isFinite(offsetMinutes) ?
+      new Date((dt+offsetMinutes*60)*1000).getUTCHours() :
+      new Date(dt*1000).getHours();
+    var time=clock==='24h'?(hour<10?'0':'')+hour:
+      (hour%12||12)+(hour>=12?'p':'a');
+    var pp=pops[i]==null?null:Number(pops[i]);
+    if(pp!=null && !isFinite(pp)) pp=null;
+    var gust=gusts[i]==null?Number(winds[i]):Number(gusts[i]);
+    if(!isFinite(gust)) gust=Number(winds[i]);
+    hours.push({dt:dt,time:String(time),temp:String(Math.round(Number(temps[i]))),
+      wind:String(Math.round(Number(winds[i]))),gust:String(Math.round(gust)),
+      rain:pp==null?'--':String(Math.round(Math.max(0,Math.min(100,pp))))+'%',
+      uv:uvs[i]==null?-1:Math.round(Number(uvs[i])),
+      cond:weatherPlusCondition(conditions[i],codes[i]),
+      night:isDays[i] == null ? (sunrise && sunset && dt<sunrise||dt>=sunset?1:0) :
+        (Number(isDays[i])?0:1)});
+  }
+  if(hours.length !== 48){ weatherPlusFallback('forecast has less than 48 usable hours');return;}
+  weatherPlusHasData=true;
+  weatherPlusLastEnvelope=envelope;
+  if(pluginFallbackTimer){clearTimeout(pluginFallbackTimer);pluginFallbackTimer=null;}
+  var headline=weatherPlusText(props.alert_headline);
+  var alertStatus=weatherPlusText(props.alert_status);
+  var alertCount=weatherPlusNumber(props.alert_count);
+  var alertKey=alertStatus==='active' && alertCount>0 ? alertStatus+':'+headline+':'+alertCount : null;
+  if(alertKey && alertKey!==lastWeatherAlert){
+    lastWeatherAlert=alertKey;
+    showStatus(headline || String(alertCount)+' local weather warning(s)',true);
+  }
+  if(alertStatus==='clear') lastWeatherAlert=null;
+  var settings=currentSettings();
+  completeForecast(hours,weatherPlusText(props.name)||'Current location',
+    clock,temperatureUnit,windUnit,
+    setting(settings,keys.SHOW_GUSTS,'SHOW_GUSTS',false),
+    sunrise,sunset,true,
+    (weatherPlusTimestamp(props.last_fetched_at) ||
+     weatherPlusTimestamp(props.updated_at) || now)*1000);
+}
+function startWeatherPlus() {
+  if(typeof Pebble.subscribeToSource!=='function') {
+    weatherPlusFallback('subscription API unavailable');
+    return;
+  }
+  if(weatherPlusSubscription && typeof weatherPlusSubscription.unsubscribe==='function')
+    weatherPlusSubscription.unsubscribe();
+  weatherPlusHasData=false;
+  try {
+    weatherPlusSubscription=Pebble.subscribeToSource({
+      category:'weather',item:'location',plugin:WEATHER_PLUS_UUID,
+      properties:['name','provider','hourly_temperature','hourly_wind_speed',
+        'hourly_wind_gust','hourly_precipitation','hourly_uv_index',
+        'hourly_weather_code','hourly_condition_code','hourly_is_day',
+        'utc_offset','sunrise','sunset','last_fetched_at','updated_at',
+        'alert_count','alert_status','alert_headline'],
+      onData:function(data){applyWeatherPlusEnvelope(data);},
+      onError:function(err){weatherPlusFallback(err && (err.code||err.message)||'source error');}
+    });
+    pluginFallbackTimer=setTimeout(function(){
+      pluginFallbackTimer=null;
+      if(!weatherPlusHasData) weatherPlusFallback('subscription not responding');
+    },20000);
+  } catch(e){weatherPlusFallback(String(e));}
+}
+function chooseWeatherSource() {
+  detectWeatherPlus(function(installed){
+    weatherPlusInstalled=installed;
+    if(installed) startWeatherPlus();
+    else {
+      if(weatherPlusSubscription && typeof weatherPlusSubscription.unsubscribe==='function')
+        weatherPlusSubscription.unsubscribe();
+      weatherPlusSubscription=null;
+      fetchWeather();
+    }
+  });
+}
+function startWeatherClockPreference() {
+  if(typeof Pebble.subscribeToSource!=='function')return;
+  try{Pebble.subscribeToSource({category:'preferences',item:'units',
+    properties:['clock'],onData:function(data){
+      var p=data&&data.instances&&data.instances[0]&&data.instances[0].properties;
+      var v=weatherPlusText(p&&p.clock);
+      var next=v==='24h'?'24h':v==='12h'?'12h':null;
+      if(next && next!==weatherPlusClock) {
+        weatherPlusClock=next;
+        if(weatherPlusInstalled && weatherPlusLastEnvelope)
+          applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
+      }
+    },onError:function(err){console.log('OS clock preference unavailable: '+err);}});
+  }catch(e){console.log('OS clock preference: '+e);}
+}
+
 function providerData(name,lat,lon,apiKey,done) {
   var base='lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
   if(name==='openmeteo') {
