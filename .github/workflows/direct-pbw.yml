@@ -85,8 +85,8 @@ jobs:
           fi
           TAG="v$VERSION"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --target "$GITHUB_SHA" \\
-              --title "Timeline WX $VERSION" \\
+            gh release create "$TAG" --target "$GITHUB_SHA" \
+              --title "Timeline WX $VERSION" \
               --notes "Timeline WX $VERSION: Weather+ plugin integration (default for new installs), enhanced source guidance, local weather alert support, synchronized watch/phone preferences, Next Up-style in-app settings menu, and forecast last-updated status. Existing provider preferences are retained."
           fi
           gh release upload "$TAG" direct-download/timeline-wx.pbw --clobber
