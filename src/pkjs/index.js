@@ -4,7 +4,62 @@
 var Clay = require('pebble-clay');            // Include Clay framework for settings UI
 var clayConfig = require('./config');         // Load settings page structure
 var keys = require('message_keys');           // Import CloudPebble message key indices
-var clay = new Clay(clayConfig);              // Initialize settings
+var clay = new Clay(clayConfig, null, {autoHandleEvents:false});
+// Weather+ UUID is fixed; other weather/location providers must not silently
+// replace the advanced Weather+ payload when Pebble preferences change.
+var WEATHER_PLUS_UUID = '7f7b6c10-93e0-4f4c-9237-7e8204c5a121';
+var weatherPlusInstalled = false;
+var weatherPlusSubscription = null;
+var weatherPlusHasData = false;
+var weatherPlusLastEnvelope = null;
+var weatherPlusClock = null;
+var lastWeatherAlert = null;
+var pluginFallbackTimer = null;
+var weatherPlusStarting = false;
+function pluginConfigPage(installed) {
+  var common = [];
+  clayConfig.forEach(function(section) {
+    if(section.type === 'section' && section.items) section.items.forEach(function(item) {
+      if(['COLOR_MODE','SHOW_GUSTS','MESSAGE_POLICY'].indexOf(item.messageKey) >= 0)
+        common.push(item);
+    });
+  });
+  if (installed) {
+    return [
+      {type:'heading',defaultValue:'Timeline WX — Weather+'},
+      {type:'text',defaultValue:'Weather+ is installed. Configure provider, location, units, weather alerts and updates in the <b>Weather+ plugin settings</b>. Timeline WX uses those settings automatically.'},
+      {type:'section',items:[{type:'heading',defaultValue:'Watch display'},common[0],common[1],common[2]]},
+      {type:'submit',defaultValue:'Save'}
+    ];
+  }
+  var copy = clayConfig.slice();
+  copy.splice(1,0,{type:'text',defaultValue:'<b>Weather+ recommended:</b> Install Weather+ to get shared weather settings and local weather warnings. Without Weather+, advanced features such as local warnings are not available. Existing weather providers still work.'});
+  return copy;
+}
+function detectWeatherPlus(done) {
+  if (typeof Pebble.enumeratePlugins !== 'function') { done(false); return; }
+  try {
+    Promise.resolve(Pebble.enumeratePlugins()).then(function(catalog) {
+      var items = Array.isArray(catalog) ? catalog :
+        (catalog && (catalog.plugins || catalog.items || catalog.results)) || [];
+      var found = items.some(function(plugin) {
+        var id = plugin && (plugin.uuid || plugin.pluginUuid ||
+          plugin.appUuid || plugin.id || (plugin.manifest && plugin.manifest.uuid));
+        return String(id || '').toLowerCase() === WEATHER_PLUS_UUID;
+      });
+      done(found);
+    }).catch(function(e) { console.log('Weather+ detection: ' + e); done(false); });
+  } catch(e) { console.log('Weather+ detection: '+e); done(false); }
+}
+// Manually handle Clay so the visible fields reflect the installed plugin.
+Pebble.addEventListener('showConfiguration',function(){
+  detectWeatherPlus(function(installed) {
+    weatherPlusInstalled = installed;
+    clay.config = pluginConfigPage(installed);
+    Pebble.openURL(clay.generateUrl());
+  });
+});
+              // Initialize settings
 
 // ==============================================================================
 // CORE DATA FETCHING FUNCTION
@@ -58,15 +113,19 @@ function sendCachedWeather() {
     if (!cache || !cache.hours || !cache.savedAt) return false;
     var settings = currentSettings(), units = setting(settings, keys.TEMP_UNIT, 'TEMP_UNIT', null) || (setting(settings, keys.UNITS, 'UNITS', 'imperial')==='metric'?'C':'F');
     var wind = windPreference(settings, units), time = setting(settings, keys.TIME_FORMAT, 'TIME_FORMAT', '12h');
-    if (cache.units !== units || cache.windUnit !== wind || cache.timeFormat !== time) return false;
+    if (!cache.viaWeatherPlus &&
+        (cache.units !== units || cache.windUnit !== wind || cache.timeFormat !== time)) return false;
+    if (cache.viaWeatherPlus && !weatherPlusInstalled) return false;
     var locMode = setting(settings, keys.LOCATION_MODE, 'LOCATION_MODE', 'gps');
     var locQuery = String(setting(settings, keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim();
-    if ((cache.locationMode || 'gps') !== locMode || (cache.locationQuery || '') !== locQuery) return false;
+    if (!cache.viaWeatherPlus &&
+        ((cache.locationMode || 'gps') !== locMode || (cache.locationQuery || '') !== locQuery)) return false;
     var hours = cache.hours.filter(function(h) { return h.dt >= Math.floor(Date.now()/1000) - 3600; });
     if (!hours.length) { showStatus('Forecast expired', true); return false; }
     hours.sunrise = cache.sunrise;
     hours.sunset = cache.sunset;
-    transmitHours(hours, cache.location, cache.savedAt, true, cache.gustsEnabled);
+    transmitHours(hours, cache.location, cache.savedAt, true, cache.gustsEnabled,
+      cache.viaWeatherPlus ? {temperature:cache.units,wind:cache.windUnit} : null);
     return true;
   } catch(e) { console.log('Cache invalid: ' + e); return false; }
 }
@@ -102,9 +161,13 @@ function packForecastRows(hours, start, end) {
   }
   return bytes;
 }
-function transmitHours(hours, location, savedAt, cached, gustsEnabled) {
-  var settings=currentSettings(), units=setting(settings,keys.TEMP_UNIT,'TEMP_UNIT','F');
-  var wind=windPreference(settings,units), count=Math.min(hours.length,48);
+function transmitHours(hours, location, savedAt, cached, gustsEnabled, overrideUnits) {
+  var settings=currentSettings();
+  var units=overrideUnits&&overrideUnits.temperature ||
+    setting(settings,keys.TEMP_UNIT,'TEMP_UNIT','F');
+  var wind=overrideUnits&&overrideUnits.wind ||
+    windPreference(settings,units);
+  var count=Math.min(hours.length,48);
   var chunks=[];
   for(var ci=0;ci<Math.ceil(count/6);ci++) chunks.push({});
   var first=chunks[0];
@@ -342,7 +405,7 @@ function fetchWeather(forceLocation) {
 // ==============================================================================
 
 // Ensures the first 12 hours complete transmission before triggering the remaining 12
-function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled, sunrise, sunset) {
+function completeForecast(hours, location, timeFormat, units, windUnit, gustsEnabled, sunrise, sunset, viaWeatherPlus, sourceTimeMs) {
   requestInProgress = false;
   retryCount = 0;
   startupCacheFallback = false;
@@ -353,18 +416,19 @@ function completeForecast(hours, location, timeFormat, units, windUnit, gustsEna
     setTimeout(function() { fetchWeather(forcePending); }, 100);
   }
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-  var savedAt = Date.now();
+  var savedAt = sourceTimeMs && isFinite(sourceTimeMs) ? Number(sourceTimeMs) : Date.now();
   hours.sunrise = sunrise;
   hours.sunset = sunset;
-  localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:setting(currentSettings(), keys.LOCATION_MODE, 'LOCATION_MODE', 'gps'), locationQuery:String(setting(currentSettings(), keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim(), savedAt:savedAt}));
-  var fingerprint = JSON.stringify({hours:hours,location:location,units:units,windUnit:windUnit,gustsEnabled:gustsEnabled,sunrise:sunrise,sunset:sunset});
+  localStorage.setItem('lastForecast', JSON.stringify({sunrise:sunrise, sunset:sunset, hours:hours, location:location, timeFormat:timeFormat, units:units, windUnit:windUnit, gustsEnabled:gustsEnabled, locationMode:setting(currentSettings(), keys.LOCATION_MODE, 'LOCATION_MODE', 'gps'), locationQuery:String(setting(currentSettings(), keys.LOCATION_QUERY, 'LOCATION_QUERY', '')).trim(), savedAt:savedAt, viaWeatherPlus:!!viaWeatherPlus}));
+  var fingerprint = JSON.stringify({hours:hours,location:location,units:units,windUnit:windUnit,gustsEnabled:gustsEnabled,timeFormat:timeFormat,sunrise:sunrise,sunset:sunset});
   if (fingerprint === lastCompletedFingerprint ||
       fingerprint === queuedFingerprint) {
     console.log('Forecast unchanged or already queued; skipping Bluetooth transfer');
     return;
   }
   queuedFingerprint = fingerprint;
-  transmitHours(hours, location, savedAt, false, gustsEnabled);
+  transmitHours(hours, location, savedAt, false, gustsEnabled,
+    viaWeatherPlus ? {temperature:units,wind:windUnit} : null);
 }
 // Serialize whole forecast transactions. Interleaved cached/live transfers
 // otherwise overwrite the watch's pending first chunk.
