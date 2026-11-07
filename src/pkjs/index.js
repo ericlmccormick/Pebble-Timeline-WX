@@ -4,7 +4,9 @@
 var Clay = require('pebble-clay');            // Include Clay framework for settings UI
 var clayConfig = require('./config');         // Load settings page structure
 var keys = require('message_keys');           // Import CloudPebble message key indices
-var clay = new Clay(clayConfig, null, {autoHandleEvents:false});
+// Register our configuration selector before Clay registers its own opener.
+// Clay itself must populate the page metadata, generate the URL and save settings.
+var clay = null;
 // Weather+ UUID is fixed; other weather/location providers must not silently
 // replace the advanced Weather+ payload when Pebble preferences change.
 var WEATHER_PLUS_UUID = '7f7b6c10-93e0-4f4c-9237-7e8204c5a121';
@@ -58,21 +60,21 @@ function weatherPlusIsInstalled() {
 function detectWeatherPlus(done) {
   done(weatherPlusIsInstalled());
 }
-// Manually handle Clay so the visible fields reflect the installed plugin.
+// The order matters: this handler runs BEFORE Clay's built-in showConfiguration
+// handler, so Clay sees the correct dynamic config and opens its page normally.
 Pebble.addEventListener('showConfiguration',function(){
-  // Pebble.openURL must happen synchronously while this event is handled.
-  var installed = weatherPlusIsInstalled();
-  weatherPlusInstalled = installed;
+  var installed=weatherPlusIsInstalled();
+  weatherPlusInstalled=installed;
   try {
-    clay.config = pluginConfigPage(installed);
-    Pebble.openURL(clay.generateUrl());
-  } catch (e) {
-    console.log('Weather+ settings rendering failed: ' + e);
-    // A full legacy Clay page is better than an empty settings screen.
-    clay.config = clayConfig;
-    Pebble.openURL(clay.generateUrl());
+    clay.config=pluginConfigPage(installed);
+  } catch(e) {
+    console.log('Weather+ settings selection failed: '+e);
+    clay.config=clayConfig;
   }
 });
+// Use Clay's supported automatic configuration and webviewclosed handlers.
+// Manual Pebble.openURL on the new Android Pebble app can leave a blank WebView.
+clay = new Clay(clayConfig);
               // Initialize settings
 
 // ==============================================================================
@@ -753,18 +755,10 @@ Pebble.addEventListener('appmessage', function(e) {
 });
 
 // Triggers when the user closes the Clay Settings menu on their phone
+// Clay has already persisted/sent settings when this listener executes.
+// Refresh watch presentation and weather only; do not parse/send twice.
 Pebble.addEventListener('webviewclosed', function(e) {
   if (!e || !e.response || e.response==='CANCELLED') return;
-  var updates={};
-  try{updates=clay.getSettings(e.response)||{};}catch(ex){
-    console.log('Could not parse Clay settings: '+ex);return;
-  }
-  var merged=currentSettings();
-  Object.keys(updates).forEach(function(k){merged[k]=updates[k];});
-  try{localStorage.setItem('clay-settings',JSON.stringify(merged));}catch(ex){}
-  Pebble.sendAppMessage(updates,null,function(err){
-    console.log('Could not send display settings: '+JSON.stringify(err));
-  });
   retryCount=0;
   sendThemeSetting();
   if(refreshTimer)clearInterval(refreshTimer);
@@ -774,10 +768,11 @@ Pebble.addEventListener('webviewclosed', function(e) {
     if (!weatherPlusInstalled || !weatherPlusHasData ||
         Date.now()-weatherPlusLastReceivedAt > 30*60*1000) fetchWeather();
   },REFRESH_MS);
-  detectWeatherPlus(function(installed) {
-    if(installed!==weatherPlusInstalled){weatherPlusInstalled=installed;chooseWeatherSource();}
-    else if(installed) {
-      if(weatherPlusLastEnvelope) applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
-    } else fetchWeather();
-  });
+  var installed=weatherPlusIsInstalled();
+  if(installed!==weatherPlusInstalled){
+    weatherPlusInstalled=installed;
+    chooseWeatherSource();
+  } else if(installed){
+    if(weatherPlusLastEnvelope) applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
+  } else fetchWeather();
 });
