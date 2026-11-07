@@ -40,42 +40,35 @@ function weatherPlusIsInstalled() {
 function detectWeatherPlus(done) {
   done(weatherPlusIsInstalled());
 }
-// Keep the complete, static Clay page. Only its read-only status text is
-// populated with metadata; never replace the settings schema at runtime.
-var weatherSourcePageData={sourceStatus:'Checking source'};
-function weatherSourceStatusText() {
-  var installed=weatherPlusIsInstalled();
-  var cached=null;
-  try { cached=JSON.parse(localStorage.getItem('lastForecast')||'null'); }
-  catch(e) { cached=null; }
-  var cachedAt=cached&&Number(cached.savedAt);
-  var cacheText=cachedAt&&isFinite(cachedAt)?
-    ' (forecast fetched '+new Date(cachedAt).toLocaleString()+')':'';
-  if (!installed) return 'Weather+ not installed — using built-in providers'+cacheText;
-  if (weatherPlusHasData) return 'Weather+ ACTIVE — forecast received from plugin'+cacheText;
-  if (cached&&cached.viaWeatherPlus)
-    return 'Weather+ installed — last forecast came from Weather+'+cacheText+
-      '; waiting for current plugin response';
-  if (cached) return 'Weather+ installed — last forecast came from built-in fallback'+cacheText;
-  return 'Weather+ installed — waiting for first forecast';
-}
-// Runs before Clay's own showConfiguration handler, without opening the
-// WebView or modifying config items. Clay remains responsible for the page.
-Pebble.addEventListener('showConfiguration',function(){
-  weatherSourcePageData.sourceStatus=weatherSourceStatusText();
-});
-function renderWeatherSourceInfo() {
-  var clayPage=this;
-  clayPage.on(clayPage.EVENTS.AFTER_BUILD,function(){
-    try {
-      var el=document.getElementById('wx-source-status');
-      if(el)el.textContent=clayPage.meta.userData.sourceStatus ||
-        'Source status unavailable';
-    }catch(e){}
+// Keep Clay's normal page lifecycle. Hide individual controls dynamically
+// inside the page using the supported ClayItem show()/hide() API.
+function configureWeatherSourcePage() {
+  var page=this;
+  page.on(page.EVENTS.AFTER_BUILD,function(){
+    var source=page.getItemByMessageKey('WEATHER_PROVIDER');
+    if(!source)return;
+    var duplicates=['API_KEY','TEMP_UNIT','WIND_UNIT','LOCATION_MODE',
+      'LOCATION_QUERY','REFRESH_INTERVAL'];
+    function setVisibility() {
+      var usePlugin=source.get()==='weatherplus';
+      duplicates.forEach(function(key){
+        var item=page.getItemByMessageKey(key);
+        if(item){if(usePlugin)item.hide();else item.show();}
+      });
+      ['location-heading','updates-heading'].forEach(function(id){
+        var heading=page.getItemById(id);
+        if(heading){if(usePlugin)heading.hide();else heading.show();}
+      });
+      var hint=page.getItemById('weather-plus-hint');
+      if(hint){if(usePlugin)hint.show();else hint.hide();}
+      var warning=page.getItemById('weather-plus-warning');
+      if(warning){if(usePlugin)warning.show();else warning.hide();}
+    }
+    setVisibility();
+    source.on('change',setVisibility);
   });
 }
-clay = new Clay(clayConfig,renderWeatherSourceInfo,
-  {userData:weatherSourcePageData});
+clay=new Clay(clayConfig,configureWeatherSourcePage);
               // Initialize settings
 
 // ==============================================================================
@@ -291,7 +284,8 @@ function weatherPlusFallback(reason,forceLocation) {
     fetchWeather(forceLocation===true);
 }
 function applyWeatherPlusEnvelope(envelope) {
-  if (!envelope || !weatherPlusInstalled) {
+  if (!envelope || !weatherPlusInstalled ||
+      selectedWeatherSource()!=='weatherplus') {
     weatherPlusFallback('Weather+ not installed or no source response');
     return;
   }
@@ -396,17 +390,26 @@ function startWeatherPlus() {
     },20000);
   } catch(e){weatherPlusFallback(String(e));}
 }
+function selectedWeatherSource() {
+  return setting(currentSettings(),keys.WEATHER_PROVIDER,'WEATHER_PROVIDER','auto');
+}
 function chooseWeatherSource() {
-  detectWeatherPlus(function(installed){
-    weatherPlusInstalled=installed;
-    if(installed) startWeatherPlus();
-    else {
-      if(weatherPlusSubscription && typeof weatherPlusSubscription.unsubscribe==='function')
-        weatherPlusSubscription.unsubscribe();
-      weatherPlusSubscription=null;
-      fetchWeather();
-    }
-  });
+  var wantsPlugin=selectedWeatherSource()==='weatherplus';
+  var installed=weatherPlusIsInstalled();
+  weatherPlusInstalled=installed;
+  if(weatherPlusSubscription && typeof weatherPlusSubscription.unsubscribe==='function')
+    weatherPlusSubscription.unsubscribe();
+  weatherPlusSubscription=null;
+  weatherPlusHasData=false;
+  if(pluginFallbackTimer){clearTimeout(pluginFallbackTimer);pluginFallbackTimer=null;}
+  if(wantsPlugin && installed) {
+    // A source subscription delivers Weather+'s cached forecast immediately
+    // when available, and Weather+ v1.0 refreshes expired data itself.
+    startWeatherPlus();
+  } else {
+    if(wantsPlugin && !installed) showStatus('Weather+ unavailable; using fallback',true);
+    fetchWeather();
+  }
 }
 function providerData(name,lat,lon,apiKey,done) {
   var base='lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
@@ -508,6 +511,8 @@ function fetchWeather(forceLocation) {
   requestInProgress=true;
   var s=currentSettings();
   var provider=setting(s,keys.WEATHER_PROVIDER,'WEATHER_PROVIDER','auto');
+  // Built-in Automatic is the emergency fallback if Weather+ was selected.
+  if(provider==='weatherplus') provider='auto';
   var apiKey=setting(s,keys.API_KEY,'API_KEY','');
   var tempUnit=setting(s,keys.TEMP_UNIT,'TEMP_UNIT',null)||
     (setting(s,keys.UNITS,'UNITS','imperial')==='metric'?'C':'F');
@@ -724,8 +729,11 @@ Pebble.addEventListener('ready', function() {
   var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
   REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
   refreshTimer=setInterval(function() {
-    if (!weatherPlusInstalled || !weatherPlusHasData ||
-        Date.now()-weatherPlusLastReceivedAt > 30*60*1000) fetchWeather();
+    if(selectedWeatherSource()!=='weatherplus') fetchWeather();
+    else if(!weatherPlusInstalled ||
+      (!weatherPlusHasData && !requestInProgress) ||
+      Date.now()-weatherPlusLastReceivedAt > 30*60*1000)
+      fetchWeather();
   },REFRESH_MS);
 });
 Pebble.addEventListener('appmessage', function(e) {
@@ -746,7 +754,8 @@ Pebble.addEventListener('appmessage', function(e) {
     acknowledgePart(request - 100, Number(rawId));
   }
   else if (request === 1) {
-    if(weatherPlusInstalled && typeof Pebble.refreshSources==='function') {
+    if(selectedWeatherSource()==='weatherplus' && weatherPlusInstalled &&
+       typeof Pebble.refreshSources==='function') {
       // Weather+ v1.0 owns its 15-minute cache. Ask it for an update;
       // it returns cached data if fresh and downloads if expired.
       Pebble.refreshSources(['weather/location']);
@@ -766,14 +775,12 @@ Pebble.addEventListener('webviewclosed', function(e) {
   var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
   REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
   refreshTimer=setInterval(function(){
-    if (!weatherPlusInstalled || !weatherPlusHasData ||
-        Date.now()-weatherPlusLastReceivedAt > 30*60*1000) fetchWeather();
+    if(selectedWeatherSource()!=='weatherplus') fetchWeather();
+    else if(!weatherPlusInstalled ||
+      (!weatherPlusHasData && !requestInProgress) ||
+      Date.now()-weatherPlusLastReceivedAt > 30*60*1000)
+      fetchWeather();
   },REFRESH_MS);
-  var installed=weatherPlusIsInstalled();
-  if(installed!==weatherPlusInstalled){
-    weatherPlusInstalled=installed;
-    chooseWeatherSource();
-  } else if(installed){
-    if(weatherPlusLastEnvelope) applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
-  } else fetchWeather();
+  // Apply the explicit source selection after Clay persists the new value.
+  chooseWeatherSource();
 });
