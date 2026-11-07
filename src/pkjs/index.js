@@ -13,7 +13,6 @@ var weatherPlusSubscription = null;
 var weatherPlusHasData = false;
 var weatherPlusLastReceivedAt = 0;
 var weatherPlusLastEnvelope = null;
-var weatherPlusClock = null;
 var lastWeatherAlert = null;
 var pluginFallbackTimer = null;
 var weatherPlusStarting = false;
@@ -21,15 +20,15 @@ function pluginConfigPage(installed) {
   var common = [];
   clayConfig.forEach(function(section) {
     if(section.type === 'section' && section.items) section.items.forEach(function(item) {
-      if(['COLOR_MODE','SHOW_GUSTS','MESSAGE_POLICY'].indexOf(item.messageKey) >= 0)
+      if(['TIME_FORMAT','COLOR_MODE','SHOW_GUSTS','MESSAGE_POLICY'].indexOf(item.messageKey) >= 0)
         common.push(item);
     });
   });
   if (installed) {
     return [
       {type:'heading',defaultValue:'Timeline WX — Weather+'},
-      {type:'text',defaultValue:'Weather+ is installed. Configure provider, location, units, weather alerts and updates in the <b>Weather+ plugin settings</b>. Timeline WX uses those settings automatically.'},
-      {type:'section',items:[{type:'heading',defaultValue:'Watch display'},common[0],common[1],common[2]]},
+      {type:'text',defaultValue:'Weather+ is installed. Configure weather source, location, measurement units and local alerts in the <b>Weather+ plugin settings</b>. Weather+ automatically serves cached data for 15 minutes, then refreshes on the next request.'},
+      {type:'section',items:[{type:'heading',defaultValue:'Watch display'},common[0],common[1],common[2],common[3]]},
       {type:'submit',defaultValue:'Save'}
     ];
   }
@@ -275,10 +274,13 @@ function weatherPlusFallback(reason,forceLocation) {
     fetchWeather(forceLocation===true);
 }
 function applyWeatherPlusEnvelope(envelope) {
-  if (!envelope || String(envelope.pluginUuid||'').toLowerCase() !== WEATHER_PLUS_UUID) {
-    weatherPlusFallback('a different plugin answered weather/location');
+  if (!envelope || !weatherPlusInstalled) {
+    weatherPlusFallback('Weather+ not installed or no source response');
     return;
   }
+  // Current Pebble source envelopes need not include a plugin UUID.
+  // Require Weather+'s extended series fields instead of relying on an
+  // optional provenance property that isn't present in v1.0.
   var instances = envelope.instances || [];
   if (!instances.length) { weatherPlusFallback('no locations'); return; }
   var props=instances[0].properties || {};
@@ -302,10 +304,8 @@ function applyWeatherPlusEnvelope(envelope) {
   var windSymbol=weatherPlusUnit(props,'hourly_wind_speed');
   var windUnit=/knots|kt/i.test(windSymbol)?'knots':
     /km/i.test(windSymbol)?'kmh':/mph/i.test(windSymbol)?'mph':'ms';
-  var configuredClock=weatherPlusText(props.time_format);
-  var clock=(configuredClock==='12h'||configuredClock==='24h'?configuredClock:null) ||
-    weatherPlusClock ||
-    setting(currentSettings(),keys.TIME_FORMAT,'TIME_FORMAT','12h');
+  // Time formatting belongs to Timeline WX, not to the weather provider.
+  var clock=setting(currentSettings(),keys.TIME_FORMAT,'TIME_FORMAT','12h');
   var offsetMinutes=weatherPlusNumber(props.utc_offset);
   var sunrise=weatherPlusTimestamp(props.sunrise);
   var sunset=weatherPlusTimestamp(props.sunset);
@@ -365,7 +365,7 @@ function startWeatherPlus() {
   try {
     weatherPlusSubscription=Pebble.subscribeToSource({
       category:'weather',item:'location',plugin:WEATHER_PLUS_UUID,
-      properties:['name','provider','time_format','hourly_temperature','hourly_wind_speed',
+      properties:['name','provider','hourly_temperature','hourly_wind_speed',
         'hourly_wind_gust','hourly_precipitation','hourly_uv_index',
         'hourly_weather_code','hourly_condition_code','hourly_is_day',
         'utc_offset','sunrise','sunset','last_fetched_at','updated_at',
@@ -391,22 +391,6 @@ function chooseWeatherSource() {
     }
   });
 }
-function startWeatherClockPreference() {
-  if(typeof Pebble.subscribeToSource!=='function')return;
-  try{Pebble.subscribeToSource({category:'preferences',item:'units',
-    properties:['clock'],onData:function(data){
-      var p=data&&data.instances&&data.instances[0]&&data.instances[0].properties;
-      var v=weatherPlusText(p&&p.clock);
-      var next=v==='24h'?'24h':v==='12h'?'12h':null;
-      if(next && next!==weatherPlusClock) {
-        weatherPlusClock=next;
-        if(weatherPlusInstalled && weatherPlusLastEnvelope)
-          applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
-      }
-    },onError:function(err){console.log('OS clock preference unavailable: '+err);}});
-  }catch(e){console.log('OS clock preference: '+e);}
-}
-
 function providerData(name,lat,lon,apiKey,done) {
   var base='lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
   if(name==='openmeteo') {
@@ -717,7 +701,6 @@ function acknowledgePart(part, transferId) {
 Pebble.addEventListener('ready', function() {
   sendThemeSetting();
   startupCacheFallback = true;
-  startWeatherClockPreference();
   chooseWeatherSource();
   // Weather+ updates its subscriptions automatically; only legacy sources
   // need local polling. Retain a 15-minute minimum for the fallback engine.
@@ -746,12 +729,10 @@ Pebble.addEventListener('appmessage', function(e) {
     acknowledgePart(request - 100, Number(rawId));
   }
   else if (request === 1) {
-    if(weatherPlusInstalled && typeof Pebble.invokeAction==='function') {
-      Pebble.invokeAction({plugin:WEATHER_PLUS_UUID,action:'force_refresh',args:{}})
-        .then(function(result){
-          if(!result || result.ok===false)
-            weatherPlusFallback('Weather+ refresh action failed',true);
-        }).catch(function(e){weatherPlusFallback('Weather+ refresh action: '+e,true);});
+    if(weatherPlusInstalled && typeof Pebble.refreshSources==='function') {
+      // Weather+ v1.0 owns its 15-minute cache. Ask it for an update;
+      // it returns cached data if fresh and downloads if expired.
+      Pebble.refreshSources(['weather/location']);
     } else fetchWeather(true);
   }
   else console.log('Unknown watch request: ' + request);
