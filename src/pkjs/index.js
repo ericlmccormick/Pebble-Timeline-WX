@@ -146,6 +146,8 @@ function sendThemeSetting() {
   var msg = {};
   msg[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
   msg[keys.MESSAGE_POLICY] = setting(settings, keys.MESSAGE_POLICY, 'MESSAGE_POLICY', 'all');
+  msg[keys.TIME_FORMAT] = setting(settings, keys.TIME_FORMAT, 'TIME_FORMAT', '12h');
+  msg[keys.SHOW_GUSTS] = Number(setting(settings, keys.SHOW_GUSTS, 'SHOW_GUSTS', 0)) ? 1 : 0;
   Pebble.sendAppMessage(msg, null, function(e) { console.log('Theme update failed: ' + JSON.stringify(e)); });
 }
 // Each row uses 20 bytes: ASCII time[4], numeric ASCII temperature[7],
@@ -765,7 +767,11 @@ Pebble.addEventListener('appmessage', function(e) {
     if(updates.TIME_FORMAT!==undefined || updates.SHOW_GUSTS!==undefined) {
       if(selectedWeatherSource()==='weatherplus' && weatherPlusLastEnvelope)
         applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
-      else if(!sendCachedWeather()) fetchWeather();
+      else {
+        // Cached data may need a new time string / gust visibility.
+        // A built-in provider refresh updates the labels and saved forecast.
+        fetchWeather();
+      }
     }
     return;
   }
