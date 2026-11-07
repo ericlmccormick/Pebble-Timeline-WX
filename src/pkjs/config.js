@@ -1,9 +1,11 @@
 module.exports = [
   {type:'heading',defaultValue:'Timeline WX Settings'},
-  {type:'text',defaultValue:'<strong>Active weather source:</strong> <span id="wx-source-status">Checking last forecast...</span><p><small>Timeline WX automatically uses Weather+ when installed and responding. The weather provider, location and units are configured in Weather+; the choices below are used when Timeline WX falls back to its built-in sources.</small></p>'},
+  {type:'text',id:'weather-plus-hint',defaultValue:'Weather+ uses its own location, forecast provider, measurement units and 15-minute cache. Configure those in the Weather+ plugin. Timeline WX keeps time format, appearance, gusts and notifications.'},
+  {type:'text',id:'weather-plus-warning',defaultValue:'Weather+ must be installed and permitted in Pebble. If unavailable, Timeline WX uses its built-in Automatic provider as a fallback.'},
   {type:'section',items:[
     {type:'heading',defaultValue:'Weather source'},
     {type:'select',messageKey:'WEATHER_PROVIDER',label:'Provider',defaultValue:'auto',options:[
+      {label:'Weather+ plugin (shared weather and alerts)',value:'weatherplus'},
       {label:'Automatic (no API key)',value:'auto'},
       {label:'Open-Meteo (global, no key)',value:'openmeteo'},
       {label:'NWS (US, no key)',value:'nws'},
@@ -27,13 +29,13 @@ module.exports = [
       {label:'Critical only',value:'critical'}]}
   ]},
   {type:'section',items:[
-    {type:'heading',defaultValue:'Location'},
+    {type:'heading',id:'location-heading',defaultValue:'Location'},
     {type:'select',messageKey:'LOCATION_MODE',label:'Source',defaultValue:'gps',options:[
       {label:'Phone GPS',value:'gps'},{label:'ZIP or city',value:'manual'}]},
     {type:'input',messageKey:'LOCATION_QUERY',label:'ZIP or city (manual only)',defaultValue:''}
   ]},
   {type:'section',items:[
-    {type:'heading',defaultValue:'Updates'},
+    {type:'heading',id:'updates-heading',defaultValue:'Updates'},
     {type:'slider',messageKey:'REFRESH_INTERVAL',label:'Refresh minutes',defaultValue:30,min:15,max:120,step:15}
   ]},
   {type:'submit',defaultValue:'Save'}
