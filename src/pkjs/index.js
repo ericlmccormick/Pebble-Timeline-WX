@@ -63,6 +63,8 @@ function configureWeatherSourcePage() {
       if(hint){if(usePlugin)hint.show();else hint.hide();}
       var warning=page.getItemById('weather-plus-warning');
       if(warning){if(usePlugin)warning.show();else warning.hide();}
+      var recommendation=page.getItemById('builtin-weather-hint');
+      if(recommendation){if(usePlugin)recommendation.hide();else recommendation.show();}
     }
     setVisibility();
     source.on('change',setVisibility);
@@ -391,7 +393,7 @@ function startWeatherPlus() {
   } catch(e){weatherPlusFallback(String(e));}
 }
 function selectedWeatherSource() {
-  return setting(currentSettings(),keys.WEATHER_PROVIDER,'WEATHER_PROVIDER','auto');
+  return setting(currentSettings(),keys.WEATHER_PROVIDER,'WEATHER_PROVIDER','weatherplus');
 }
 function chooseWeatherSource() {
   var wantsPlugin=selectedWeatherSource()==='weatherplus';
@@ -407,7 +409,7 @@ function chooseWeatherSource() {
     // when available, and Weather+ v1.0 refreshes expired data itself.
     startWeatherPlus();
   } else {
-    if(wantsPlugin && !installed) showStatus('Weather+ unavailable; using fallback',true);
+    if(wantsPlugin && !installed) showStatus('Install Weather+ from Pebble store',true);
     fetchWeather();
   }
 }
@@ -742,6 +744,31 @@ Pebble.addEventListener('appmessage', function(e) {
   // Some Pebble bridges expose incoming keys by symbolic name instead of
   // numeric ID. Support both representations and log the received payload.
   console.log('Watch appmessage: ' + JSON.stringify(payload));
+  // Watch-side settings menu sends direct setting keys (no refresh request).
+  // Persist them in Clay's existing storage so phone and watch stay in sync.
+  var updates={}, settingsChanged=false;
+  ['TIME_FORMAT','COLOR_MODE','SHOW_GUSTS','MESSAGE_POLICY'].forEach(function(name){
+    var key=keys[name];
+    var v=payload[key];
+    if(v===undefined)v=payload[name];
+    if(v===undefined)v=payload[String(key)];
+    if(v!==undefined && v!==null) {
+      updates[name]=v;
+      settingsChanged=true;
+    }
+  });
+  if(settingsChanged) {
+    var settings=currentSettings();
+    Object.keys(updates).forEach(function(name){settings[name]=updates[name];});
+    localStorage.setItem('clay-settings',JSON.stringify(settings));
+    sendThemeSetting();
+    if(updates.TIME_FORMAT!==undefined || updates.SHOW_GUSTS!==undefined) {
+      if(selectedWeatherSource()==='weatherplus' && weatherPlusLastEnvelope)
+        applyWeatherPlusEnvelope(weatherPlusLastEnvelope);
+      else if(!sendCachedWeather()) fetchWeather();
+    }
+    return;
+  }
   var raw = payload[keys.REFRESH_REQUEST];
   if (raw === undefined) raw = payload.REFRESH_REQUEST;
   if (raw === undefined) raw = payload[String(keys.REFRESH_REQUEST)];
