@@ -36,28 +36,42 @@ function pluginConfigPage(installed) {
   copy.splice(1,0,{type:'text',defaultValue:'<b>Weather+ recommended:</b> Install Weather+ to get shared weather settings and local weather warnings. Without Weather+, advanced features such as local warnings are not available. Existing weather providers still work.'});
   return copy;
 }
-function detectWeatherPlus(done) {
-  if (typeof Pebble.enumeratePlugins !== 'function') { done(false); return; }
+function weatherPlusIsInstalled() {
+  // Pebble's enumeratePlugins() is synchronous. Never defer Pebble.openURL()
+  // beyond the showConfiguration event; Android can otherwise open a blank page.
+  if (typeof Pebble.enumeratePlugins !== 'function') return false;
   try {
-    Promise.resolve(Pebble.enumeratePlugins()).then(function(catalog) {
-      var items = Array.isArray(catalog) ? catalog :
-        (catalog && (catalog.plugins || catalog.items || catalog.results)) || [];
-      var found = items.some(function(plugin) {
-        var id = plugin && (plugin.uuid || plugin.pluginUuid ||
-          plugin.appUuid || plugin.id || (plugin.manifest && plugin.manifest.uuid));
-        return String(id || '').toLowerCase() === WEATHER_PLUS_UUID;
-      });
-      done(found);
-    }).catch(function(e) { console.log('Weather+ detection: ' + e); done(false); });
-  } catch(e) { console.log('Weather+ detection: '+e); done(false); }
+    var catalog = Pebble.enumeratePlugins();
+    var items = Array.isArray(catalog) ? catalog :
+      (catalog && (catalog.plugins || catalog.items || catalog.results)) || [];
+    if (!Array.isArray(items)) return false;
+    return items.some(function(plugin) {
+      var id = plugin && (plugin.uuid || plugin.pluginUuid ||
+        plugin.appUuid || plugin.id || (plugin.manifest && plugin.manifest.uuid));
+      return String(id || '').toLowerCase() === WEATHER_PLUS_UUID;
+    });
+  } catch (e) {
+    console.log('Weather+ detection failed: ' + e);
+    return false;
+  }
+}
+function detectWeatherPlus(done) {
+  done(weatherPlusIsInstalled());
 }
 // Manually handle Clay so the visible fields reflect the installed plugin.
 Pebble.addEventListener('showConfiguration',function(){
-  detectWeatherPlus(function(installed) {
-    weatherPlusInstalled = installed;
+  // Pebble.openURL must happen synchronously while this event is handled.
+  var installed = weatherPlusIsInstalled();
+  weatherPlusInstalled = installed;
+  try {
     clay.config = pluginConfigPage(installed);
     Pebble.openURL(clay.generateUrl());
-  });
+  } catch (e) {
+    console.log('Weather+ settings rendering failed: ' + e);
+    // A full legacy Clay page is better than an empty settings screen.
+    clay.config = clayConfig;
+    Pebble.openURL(clay.generateUrl());
+  }
 });
               // Initialize settings
 
