@@ -40,9 +40,42 @@ function weatherPlusIsInstalled() {
 function detectWeatherPlus(done) {
   done(weatherPlusIsInstalled());
 }
-// Always expose the complete, static Timeline WX settings page.
-// Plugin detection remains independent of Clay's configuration UI.
-clay = new Clay(clayConfig);
+// Keep the complete, static Clay page. Only its read-only status text is
+// populated with metadata; never replace the settings schema at runtime.
+var weatherSourcePageData={sourceStatus:'Checking source'};
+function weatherSourceStatusText() {
+  var installed=weatherPlusIsInstalled();
+  var cached=null;
+  try { cached=JSON.parse(localStorage.getItem('lastForecast')||'null'); }
+  catch(e) { cached=null; }
+  var cachedAt=cached&&Number(cached.savedAt);
+  var cacheText=cachedAt&&isFinite(cachedAt)?
+    ' (forecast fetched '+new Date(cachedAt).toLocaleString()+')':'';
+  if (!installed) return 'Weather+ not installed — using built-in providers'+cacheText;
+  if (weatherPlusHasData) return 'Weather+ ACTIVE — forecast received from plugin'+cacheText;
+  if (cached&&cached.viaWeatherPlus)
+    return 'Weather+ installed — last forecast came from Weather+'+cacheText+
+      '; waiting for current plugin response';
+  if (cached) return 'Weather+ installed — last forecast came from built-in fallback'+cacheText;
+  return 'Weather+ installed — waiting for first forecast';
+}
+// Runs before Clay's own showConfiguration handler, without opening the
+// WebView or modifying config items. Clay remains responsible for the page.
+Pebble.addEventListener('showConfiguration',function(){
+  weatherSourcePageData.sourceStatus=weatherSourceStatusText();
+});
+function renderWeatherSourceInfo() {
+  var clayPage=this;
+  clayPage.on(clayPage.EVENTS.AFTER_BUILD,function(){
+    try {
+      var el=document.getElementById('wx-source-status');
+      if(el)el.textContent=clayPage.meta.userData.sourceStatus ||
+        'Source status unavailable';
+    }catch(e){}
+  });
+}
+clay = new Clay(clayConfig,renderWeatherSourceInfo,
+  {userData:weatherSourcePageData});
               // Initialize settings
 
 // ==============================================================================
