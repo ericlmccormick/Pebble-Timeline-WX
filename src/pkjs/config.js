@@ -1,10 +1,11 @@
 module.exports = [
   {type:'heading',defaultValue:'Timeline WX Settings'},
   {type:'text',id:'weather-plus-hint',defaultValue:'Weather+ uses its own location, forecast provider, measurement units and 15-minute cache. Configure those in the Weather+ plugin. Timeline WX keeps time format, appearance, gusts and notifications.'},
-  {type:'text',id:'weather-plus-warning',defaultValue:'Weather+ must be installed and permitted in Pebble. If unavailable, Timeline WX uses its built-in Automatic provider as a fallback.'},
+  {type:'text',id:'weather-plus-warning',defaultValue:'If Weather+ is not installed, open the Pebble app store, search for Weather+, and install the plugin. Until then, Timeline WX uses a built-in backup weather provider.'},
+  {type:'text',id:'builtin-weather-hint',defaultValue:'Recommended: switch to the Weather+ plugin for new weather features, local alerts, and better long-term support. Install Weather+ from the Pebble app store, then choose it as your source.'},
   {type:'section',items:[
     {type:'heading',defaultValue:'Weather source'},
-    {type:'select',messageKey:'WEATHER_PROVIDER',label:'Provider',defaultValue:'auto',options:[
+    {type:'select',messageKey:'WEATHER_PROVIDER',label:'Provider',defaultValue:'weatherplus',options:[
       {label:'Weather+ plugin (shared weather and alerts)',value:'weatherplus'},
       {label:'Automatic (no API key)',value:'auto'},
       {label:'Open-Meteo (global, no key)',value:'openmeteo'},
