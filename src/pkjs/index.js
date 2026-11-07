@@ -722,7 +722,8 @@ Pebble.addEventListener('ready', function() {
   var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
   REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
   refreshTimer=setInterval(function() {
-    if (!weatherPlusInstalled || !weatherPlusHasData) fetchWeather();
+    if (!weatherPlusInstalled || !weatherPlusHasData ||
+        Date.now()-weatherPlusLastReceivedAt > 30*60*1000) fetchWeather();
   },REFRESH_MS);
 });
 Pebble.addEventListener('appmessage', function(e) {
@@ -773,7 +774,8 @@ Pebble.addEventListener('webviewclosed', function(e) {
   var mins=Number(setting(currentSettings(),keys.REFRESH_INTERVAL,'REFRESH_INTERVAL',30));
   REFRESH_MS=Math.max(15,Math.min(120,mins||30))*60000;
   refreshTimer=setInterval(function(){
-    if (!weatherPlusInstalled || !weatherPlusHasData) fetchWeather();
+    if (!weatherPlusInstalled || !weatherPlusHasData ||
+        Date.now()-weatherPlusLastReceivedAt > 30*60*1000) fetchWeather();
   },REFRESH_MS);
   detectWeatherPlus(function(installed) {
     if(installed!==weatherPlusInstalled){weatherPlusInstalled=installed;chooseWeatherSource();}
