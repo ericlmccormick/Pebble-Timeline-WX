@@ -35,9 +35,11 @@ static bool s_critical_only = false;
 #define WEATHER_APPEARANCE_KEY 7195
 static bool s_clock_24 = false;
 static Window *s_settings_window = NULL;
-static SimpleMenuLayer *s_settings_menu = NULL;
-static SimpleMenuItem s_settings_items[5];
-static SimpleMenuSection s_settings_sections[1];
+static MenuLayer *s_settings_menu = NULL;
+static Window *s_choice_window = NULL;
+static MenuLayer *s_choice_menu = NULL;
+static int s_choice_setting = 0;  // Index of currently edited setting.
+static char s_refresh_subtitle[40] = "Never updated";
 #define NOTIFICATION_HEIGHT 20
 static AppTimer *s_status_timer = NULL;
 static AppTimer *s_slide_timer = NULL;
@@ -235,81 +237,172 @@ static void send_watch_gust_preference(bool enabled) {
   dict_write_end(out);
   app_message_outbox_send();
 }
-static void update_settings_subtitles(void) {
-  s_settings_items[0].subtitle = s_clock_24 ? "24-hour" : "12-hour";
-  s_settings_items[1].subtitle = s_color_mode == 1 ? "Day" :
-      s_color_mode == 2 ? "Night" : "Auto";
-  s_settings_items[2].subtitle = s_gust_enabled ? "On" : "Off";
-  s_settings_items[3].subtitle = s_critical_only ? "Critical only" : "All";
-  if (s_settings_menu)
-    layer_mark_dirty(simple_menu_layer_get_layer(s_settings_menu));
+// Native list navigation follows Next Up Agenda's MenuLayer behavior:
+// arrows move a highlight, SELECT opens a choice list, BACK returns.
+static const char *const SETTINGS_NAMES[5] = {
+  "Time format", "Appearance", "Show gusts", "Notifications",
+  "Refresh weather"
+};
+static const char *const CLOCK_OPTIONS[2] = {"12-hour", "24-hour"};
+static const char *const COLOR_OPTIONS[3] = {"Auto", "Day", "Night"};
+static const char *const GUST_OPTIONS[2] = {"Off", "On"};
+static const char *const POLICY_OPTIONS[2] = {"All messages", "Critical only"};
+
+static const char *settings_value(int index) {
+  switch(index) {
+    case 0: return s_clock_24 ? CLOCK_OPTIONS[1] : CLOCK_OPTIONS[0];
+    case 1: return COLOR_OPTIONS[s_color_mode < 0 || s_color_mode > 2 ? 0 : s_color_mode];
+    case 2: return s_gust_enabled ? GUST_OPTIONS[1] : GUST_OPTIONS[0];
+    case 3: return s_critical_only ? POLICY_OPTIONS[1] : POLICY_OPTIONS[0];
+    case 4: return s_refresh_subtitle;
+  }
+  return "";
 }
-static void settings_item_selected(int index, void *context) {
-  switch (index) {
+static void update_refresh_subtitle(void) {
+  if (!s_has_forecast || s_forecast_timestamp <= 0) {
+    snprintf(s_refresh_subtitle,sizeof(s_refresh_subtitle),"Never updated");
+    return;
+  }
+  struct tm *when=localtime(&s_forecast_timestamp);
+  if (!when) {
+    snprintf(s_refresh_subtitle,sizeof(s_refresh_subtitle),"Time unknown");
+    return;
+  }
+  char when_text[32];
+  // Actual weather retrieval timestamp, not when the UI was opened.
+  strftime(when_text,sizeof(when_text),"%b %d %I:%M%p",when);
+  snprintf(s_refresh_subtitle,sizeof(s_refresh_subtitle),"Updated %s",when_text);
+}
+static void update_settings_subtitles(void) {
+  update_refresh_subtitle();
+  if(s_settings_menu)menu_layer_reload_data(s_settings_menu);
+  if(s_choice_menu)menu_layer_reload_data(s_choice_menu);
+}
+static uint16_t settings_rows(MenuLayer *menu,uint16_t section,void *context) {
+  return menu==s_choice_menu ? (s_choice_setting==1 ? 3 : 2) : 5;
+}
+static void settings_row_draw(GContext *ctx,const Layer *layer,
+                              MenuIndex *index,void *context) {
+  int row=index->row;
+  if (s_choice_menu && context==(void*)s_choice_window) {
+    const char *label= s_choice_setting==0 ? CLOCK_OPTIONS[row] :
+        s_choice_setting==1 ? COLOR_OPTIONS[row] :
+        s_choice_setting==2 ? GUST_OPTIONS[row] : POLICY_OPTIONS[row];
+    int selected= s_choice_setting==0 ? (s_clock_24?1:0) :
+        s_choice_setting==1 ? s_color_mode :
+        s_choice_setting==2 ? (s_gust_enabled?1:0) :
+        (s_critical_only?1:0);
+    menu_cell_basic_draw(ctx,layer,label,selected==row?"Selected":NULL,NULL);
+    return;
+  }
+  menu_cell_basic_draw(ctx,layer,SETTINGS_NAMES[row],settings_value(row),NULL);
+}
+static uint16_t settings_row_height(MenuLayer *menu,MenuIndex *index,
+                                   void *context) {
+  return 52;
+}
+static void settings_choice_unload(Window *window) {
+  if(s_choice_menu) {
+    menu_layer_destroy(s_choice_menu);
+    s_choice_menu=NULL;
+  }
+  s_choice_window=NULL;
+  window_destroy(window);
+}
+static void settings_main_unload(Window *window) {
+  if(s_settings_menu) {
+    menu_layer_destroy(s_settings_menu);
+    s_settings_menu=NULL;
+  }
+  s_settings_window=NULL;
+  window_destroy(window);
+}
+static void settings_choice_select(MenuLayer *menu,MenuIndex *index,void *context) {
+  int option=index->row;
+  switch(s_choice_setting) {
     case 0:
-      s_clock_24 = !s_clock_24;
-      persist_write_bool(WEATHER_TIME_FORMAT_KEY, s_clock_24);
-      send_watch_preference(MESSAGE_KEY_TIME_FORMAT, s_clock_24 ? "24h" : "12h");
+      s_clock_24=(option==1);
+      persist_write_bool(WEATHER_TIME_FORMAT_KEY,s_clock_24);
+      send_watch_preference(MESSAGE_KEY_TIME_FORMAT,s_clock_24?"24h":"12h");
       break;
     case 1:
-      s_color_mode = (s_color_mode + 1) % 3;
-      persist_write_int(WEATHER_APPEARANCE_KEY, s_color_mode);
-      s_last_auto_dark = is_dark_mode();
+      s_color_mode=option;
+      persist_write_int(WEATHER_APPEARANCE_KEY,s_color_mode);
+      s_last_auto_dark=is_dark_mode();
       layer_mark_dirty(s_canvas_layer);
       send_watch_preference(MESSAGE_KEY_COLOR_MODE,
-          s_color_mode == 1 ? "day" : s_color_mode == 2 ? "night" : "auto");
+          option==1?"day":option==2?"night":"auto");
       break;
     case 2:
-      s_gust_enabled = !s_gust_enabled;
-      persist_write_bool(WEATHER_GUST_SETTING_KEY, s_gust_enabled);
+      s_gust_enabled=(option==1);
+      persist_write_bool(WEATHER_GUST_SETTING_KEY,s_gust_enabled);
       send_watch_gust_preference(s_gust_enabled);
       break;
     case 3:
-      set_notification_policy(!s_critical_only);
+      set_notification_policy(option==1);
       send_watch_preference(MESSAGE_KEY_MESSAGE_POLICY,
-          s_critical_only ? "critical" : "all");
+          s_critical_only?"critical":"all");
       break;
-    case 4:
-      refresh_click_handler(NULL, NULL);
-      if (s_settings_window) window_stack_pop(true);
-      return;
   }
   update_settings_subtitles();
+  window_stack_pop(true);
 }
-static void settings_window_unload(Window *window) {
-  if (s_settings_menu) {
-    simple_menu_layer_destroy(s_settings_menu);
-    s_settings_menu = NULL;
+static void settings_main_select(MenuLayer *menu,MenuIndex *index,void *context) {
+  if(index->row==4) {
+    refresh_click_handler(NULL,NULL);
+    update_settings_subtitles();
+    return;
   }
-  s_settings_window = NULL;
-  window_destroy(window);
+  s_choice_setting=index->row;
+  if(s_choice_window)return;
+  s_choice_window=window_create();
+  window_set_window_handlers(s_choice_window,(WindowHandlers){
+    .load=NULL,.unload=settings_choice_unload
+  });
+  s_choice_menu=menu_layer_create(
+      layer_get_bounds(window_get_root_layer(s_choice_window)));
+  menu_layer_set_normal_colors(s_choice_menu,GColorWhite,GColorBlack);
+  menu_layer_set_highlight_colors(s_choice_menu,
+      PBL_IF_COLOR_ELSE(GColorCyan,GColorBlack),
+      PBL_IF_COLOR_ELSE(GColorBlack,GColorWhite));
+  menu_layer_set_callbacks(s_choice_menu,s_choice_window,(MenuLayerCallbacks){
+    .get_num_rows=settings_rows,
+    .get_cell_height=settings_row_height,
+    .draw_row=settings_row_draw,
+    .select_click=settings_choice_select
+  });
+  menu_layer_set_click_config_onto_window(s_choice_menu,s_choice_window);
+  layer_add_child(window_get_root_layer(s_choice_window),
+      menu_layer_get_layer(s_choice_menu));
+  int current=s_choice_setting==0?(s_clock_24?1:0):
+      s_choice_setting==1?s_color_mode:
+      s_choice_setting==2?(s_gust_enabled?1:0):
+      (s_critical_only?1:0);
+  menu_layer_set_selected_index(s_choice_menu,(MenuIndex){0,current},
+                                MenuRowAlignCenter,false);
+  window_stack_push(s_choice_window,true);
 }
-static void settings_window_load(Window *window) {
-  s_settings_items[0] = (SimpleMenuItem){.title="Time format",
-      .callback=settings_item_selected};
-  s_settings_items[1] = (SimpleMenuItem){.title="Appearance",
-      .callback=settings_item_selected};
-  s_settings_items[2] = (SimpleMenuItem){.title="Show gusts",
-      .callback=settings_item_selected};
-  s_settings_items[3] = (SimpleMenuItem){.title="Notifications",
-      .callback=settings_item_selected};
-  s_settings_items[4] = (SimpleMenuItem){.title="Refresh weather",
-      .subtitle="Request latest forecast",.callback=settings_item_selected};
-  s_settings_sections[0] = (SimpleMenuSection){
-      .title="Timeline WX settings",.num_items=5,.items=s_settings_items};
-  s_settings_menu = simple_menu_layer_create(
-      layer_get_bounds(window_get_root_layer(window)),window,
-      s_settings_sections,1,NULL);
-  layer_add_child(window_get_root_layer(window),
-      simple_menu_layer_get_layer(s_settings_menu));
-  update_settings_subtitles();
-}
-static void settings_open_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_settings_window) return;
-  s_settings_window = window_create();
+static void settings_open_handler(ClickRecognizerRef recognizer,void *context) {
+  if(s_settings_window)return;
+  update_refresh_subtitle();
+  s_settings_window=window_create();
   window_set_window_handlers(s_settings_window,
-      (WindowHandlers){.load=settings_window_load,
-                       .unload=settings_window_unload});
+      (WindowHandlers){.unload=settings_main_unload});
+  s_settings_menu=menu_layer_create(
+      layer_get_bounds(window_get_root_layer(s_settings_window)));
+  menu_layer_set_normal_colors(s_settings_menu,GColorWhite,GColorBlack);
+  menu_layer_set_highlight_colors(s_settings_menu,
+      PBL_IF_COLOR_ELSE(GColorCyan,GColorBlack),
+      PBL_IF_COLOR_ELSE(GColorBlack,GColorWhite));
+  menu_layer_set_callbacks(s_settings_menu,s_settings_window,(MenuLayerCallbacks){
+    .get_num_rows=settings_rows,
+    .get_cell_height=settings_row_height,
+    .draw_row=settings_row_draw,
+    .select_click=settings_main_select
+  });
+  menu_layer_set_click_config_onto_window(s_settings_menu,s_settings_window);
+  layer_add_child(window_get_root_layer(s_settings_window),
+      menu_layer_get_layer(s_settings_menu));
   window_stack_push(s_settings_window,true);
 }
 
@@ -851,6 +944,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_cached = s_pending_cached;
     if (s_scroll_offset > total - 6) s_scroll_offset = total > 6 ? total - 6 : 0;
     s_has_forecast = true;
+    update_settings_subtitles();
     s_pending_first = false;
     update_icons_for_view();
     layer_mark_dirty(s_canvas_layer);
