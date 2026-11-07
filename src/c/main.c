@@ -217,12 +217,20 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
   }
 }
 
+static bool is_dark_mode(void);
 // Watch-side settings. Long SELECT opens this native Pebble menu;
 // refresh remains available as the final menu item.
 static void send_watch_preference(uint32_t key, const char *value) {
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) return;
   dict_write_cstring(out, key, value);
+  dict_write_end(out);
+  app_message_outbox_send();
+}
+static void send_watch_gust_preference(bool enabled) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) return;
+  dict_write_uint8(out, MESSAGE_KEY_SHOW_GUSTS, enabled ? 1 : 0);
   dict_write_end(out);
   app_message_outbox_send();
 }
@@ -253,7 +261,7 @@ static void settings_item_selected(int index, void *context) {
     case 2:
       s_gust_enabled = !s_gust_enabled;
       persist_write_bool(WEATHER_GUST_SETTING_KEY, s_gust_enabled);
-      send_watch_preference(MESSAGE_KEY_SHOW_GUSTS, s_gust_enabled ? "1" : "0");
+      send_watch_gust_preference(s_gust_enabled);
       break;
     case 3:
       set_notification_policy(!s_critical_only);
