@@ -11,6 +11,7 @@ var WEATHER_PLUS_UUID = '7f7b6c10-93e0-4f4c-9237-7e8204c5a121';
 var weatherPlusInstalled = false;
 var weatherPlusSubscription = null;
 var weatherPlusHasData = false;
+var weatherPlusLastReceivedAt = 0;
 var weatherPlusLastEnvelope = null;
 var weatherPlusClock = null;
 var lastWeatherAlert = null;
@@ -264,9 +265,14 @@ function weatherPlusCondition(value,raw) {
   if(c==='thunderstorm') return 200;
   return textCode(c);
 }
-function weatherPlusFallback(reason) {
+function weatherPlusFallback(reason,forceLocation) {
   console.log('Weather+ unavailable, using original providers: ' + reason);
-  if (!weatherPlusHasData && !requestInProgress) fetchWeather();
+  // Keep a recent complete Weather+ forecast on-screen during transient errors.
+  // If the plugin is unavailable for over 30 minutes, recover using the legacy API.
+  if (!requestInProgress &&
+      (forceLocation || !weatherPlusHasData ||
+       Date.now()-weatherPlusLastReceivedAt > 30*60*1000))
+    fetchWeather(forceLocation===true);
 }
 function applyWeatherPlusEnvelope(envelope) {
   if (!envelope || String(envelope.pluginUuid||'').toLowerCase() !== WEATHER_PLUS_UUID) {
@@ -326,6 +332,7 @@ function applyWeatherPlusEnvelope(envelope) {
   }
   if(hours.length !== 48){ weatherPlusFallback('forecast has less than 48 usable hours');return;}
   weatherPlusHasData=true;
+  weatherPlusLastReceivedAt=Date.now();
   weatherPlusLastEnvelope=envelope;
   if(pluginFallbackTimer){clearTimeout(pluginFallbackTimer);pluginFallbackTimer=null;}
   var headline=weatherPlusText(props.alert_headline);
@@ -740,8 +747,8 @@ Pebble.addEventListener('appmessage', function(e) {
       Pebble.invokeAction({plugin:WEATHER_PLUS_UUID,action:'force_refresh',args:{}})
         .then(function(result){
           if(!result || result.ok===false)
-            weatherPlusFallback('Weather+ refresh action failed');
-        }).catch(function(e){weatherPlusFallback('Weather+ refresh action: '+e);});
+            weatherPlusFallback('Weather+ refresh action failed',true);
+        }).catch(function(e){weatherPlusFallback('Weather+ refresh action: '+e,true);});
     } else fetchWeather(true);
   }
   else console.log('Unknown watch request: ' + request);
