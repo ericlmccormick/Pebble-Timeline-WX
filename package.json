@@ -211,10 +211,6 @@
             "geocoding-api.open-meteo.com"
           ]
         }
-      },
-      {
-        "name": "InvokeAction",
-        "plugin": "7f7b6c10-93e0-4f4c-9237-7e8204c5a121"
       }
     ]
   },
