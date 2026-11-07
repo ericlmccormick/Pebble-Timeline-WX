@@ -218,6 +218,7 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static bool is_dark_mode(void);
+static void refresh_click_handler(ClickRecognizerRef recognizer, void *context);
 // Watch-side settings. Long SELECT opens this native Pebble menu;
 // refresh remains available as the final menu item.
 static void send_watch_preference(uint32_t key, const char *value) {
