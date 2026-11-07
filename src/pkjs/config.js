@@ -1,5 +1,6 @@
 module.exports = [
   {type:'heading',defaultValue:'Timeline WX Settings'},
+  {type:'text',defaultValue:'<strong>Active weather source:</strong> <span id="wx-source-status">Checking last forecast...</span><p><small>Timeline WX automatically uses Weather+ when installed and responding. The weather provider, location and units are configured in Weather+; the choices below are used when Timeline WX falls back to its built-in sources.</small></p>'},
   {type:'section',items:[
     {type:'heading',defaultValue:'Weather source'},
     {type:'select',messageKey:'WEATHER_PROVIDER',label:'Provider',defaultValue:'auto',options:[
