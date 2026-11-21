@@ -287,6 +287,26 @@ function weatherPlusFallback(reason,forceLocation) {
        Date.now()-weatherPlusLastReceivedAt > 30*60*1000))
     fetchWeather(forceLocation===true);
 }
+function forecastClock(timeZone, offsetMinutes, style) {
+  var formatter;
+  if (timeZone && typeof Intl !== 'undefined') {
+    try {
+      formatter = new Intl.DateTimeFormat('en-GB', {timeZone:timeZone, hour:'2-digit', hourCycle:'h23'});
+    } catch (e) {}
+  }
+  var priorHour = -1;
+  return function(dt) {
+    var date = new Date(dt * 1000);
+    var hour = formatter ? Number(formatter.format(date)) % 24 :
+      offsetMinutes != null && isFinite(offsetMinutes) ?
+      new Date(date.getTime() + offsetMinutes * 60000).getUTCHours() : date.getHours();
+    var repeated = hour === priorHour;
+    priorHour = hour;
+    var label = style === '24h' ? (hour < 10 ? '0' : '') + hour :
+      (hour % 12 || 12) + (hour >= 12 ? 'p' : 'a');
+    return repeated ? label + '*' : label;
+  };
+}
 function applyWeatherPlusEnvelope(envelope) {
   if (!envelope || !weatherPlusInstalled ||
       selectedWeatherSource()!=='weatherplus') {
@@ -322,6 +342,7 @@ function applyWeatherPlusEnvelope(envelope) {
   // Time formatting belongs to Timeline WX, not to the weather provider.
   var clock=setting(currentSettings(),keys.TIME_FORMAT,'TIME_FORMAT','12h');
   var offsetMinutes=weatherPlusNumber(props.utc_offset);
+  var clockLabel=forecastClock(weatherPlusText(props.timezone),offsetMinutes,clock);
   var sunrise=weatherPlusTimestamp(props.sunrise);
   var sunset=weatherPlusTimestamp(props.sunset);
   var hours=[];
@@ -330,11 +351,7 @@ function applyWeatherPlusEnvelope(envelope) {
     var dt=Number(ts.start)+i*3600;
     if (dt < now-3600 || dt > now+49*3600 || temps[i]==null || winds[i]==null ||
       !isFinite(temps[i]) || !isFinite(winds[i])) break;
-    var hour=offsetMinutes!=null && isFinite(offsetMinutes) ?
-      new Date((dt+offsetMinutes*60)*1000).getUTCHours() :
-      new Date(dt*1000).getHours();
-    var time=clock==='24h'?(hour<10?'0':'')+hour:
-      (hour%12||12)+(hour>=12?'p':'a');
+    var time=clockLabel(dt);
     var pp=pops[i]==null?null:Number(pops[i]);
     if(pp!=null && !isFinite(pp)) pp=null;
     var gust=gusts[i]==null?Number(winds[i]):Number(gusts[i]);
@@ -383,7 +400,7 @@ function startWeatherPlus() {
       properties:['name','provider','hourly_temperature','hourly_wind_speed',
         'hourly_wind_gust','hourly_precipitation','hourly_uv_index',
         'hourly_weather_code','hourly_condition_code','hourly_is_day',
-        'utc_offset','sunrise','sunset','last_fetched_at','updated_at',
+        'utc_offset','timezone','sunrise','sunset','last_fetched_at','updated_at',
         'alert_count','alert_status','alert_headline'],
       onData:function(data){applyWeatherPlusEnvelope(data);},
       onError:function(err){weatherPlusFallback(err && (err.code||err.message)||'source error');}
@@ -428,7 +445,7 @@ function providerData(name,lat,lon,apiKey,done) {
           for(var i=0;i<a.time.length;i++)rows.push({dt:a.time[i],temp:a.temperature_2m[i],
             wind:a.wind_speed_10m[i],gust:a.wind_gusts_10m[i],pop:a.precipitation_probability[i]==null?null:a.precipitation_probability[i]/100,
             uv:a.uv_index[i],cond:wmoCode(a.weather_code[i]),night:a.is_day[i]===0?1:0});
-          done(null,{rows:rows,sunrise:r.daily&&r.daily.sunrise,sunset:r.daily&&r.daily.sunset});
+          done(null,{rows:rows,timeZone:r.timezone,offsetMinutes:r.utc_offset_seconds/60,sunrise:r.daily&&r.daily.sunrise,sunset:r.daily&&r.daily.sunset});
         }catch(e){done(e);}
       });return;
   }
@@ -440,6 +457,7 @@ function providerData(name,lat,lon,apiKey,done) {
       try{done(null,{rows:r.hourly.map(function(h){return {dt:h.dt,temp:h.temp,wind:h.wind_speed,
         gust:h.wind_gust,pop:h.pop,uv:h.uvi,cond:h.weather[0].id,
         night:/n$/.test(h.weather[0].icon)?1:0};}),
+        timeZone:r.timezone,offsetMinutes:r.timezone_offset/60,
         sunrise:r.current&&r.current.sunrise,sunset:r.current&&r.current.sunset});}
       catch(e){done(e);}
     });return;
@@ -452,7 +470,7 @@ function providerData(name,lat,lon,apiKey,done) {
       if(!url){done(new Error('NWS no forecast'));return;}
       httpJson(url,function(err,f){
         if(err){done(err);return;}
-        try{done(null,{rows:f.properties.periods.map(function(p){
+        try{done(null,{timeZone:r.properties.timeZone,rows:f.properties.periods.map(function(p){
           var wind=parseFloat(p.windSpeed)||0;
           var mps=/km\/h|kph/i.test(p.windSpeed)?wind/3.6:wind*0.44704;
           return {dt:Date.parse(p.startTime)/1000,temp:p.temperatureUnit==='F'?(p.temperature-32)*5/9:p.temperature,
@@ -533,13 +551,20 @@ function fetchWeather(forceLocation) {
       if(i>=providers.length){fail('All weather sources failed');return;}
       var name=providers[i];
       providerData(name,lat,lon,apiKey,function(err,data) {
-        if(err){console.log(name+': '+err);if(provider==='auto')attempt(i+1);else fail(name+' failed: '+err.message);return;}
+        if(err){
+          console.log(name+': '+err);
+          if(provider==='auto')attempt(i+1);
+          else if(name==='openweather' && /401|403/.test(err.message))
+            fail('OpenWeather: check One Call 3.0 access');
+          else fail(name+' failed: '+err.message);
+          return;
+        }
         var now=Math.floor(Date.now()/1000);
         var rows=validHourlyRows(data.rows,now);
         if(rows.length<48){if(provider==='auto')attempt(i+1);else fail('Incomplete '+name+' forecast');return;}
+        var clockLabel=forecastClock(data.timeZone,data.offsetMinutes,timeFormat);
         var formatted=rows.map(function(h){
-          var hr=new Date(h.dt*1000).getHours();
-          var t=timeFormat==='24h'?(hr<10?'0':'')+hr:(hr%12||12)+(hr>=12?'p':'a');
+          var t=clockLabel(h.dt);
           var c=h.temp, v=tempUnit==='F'?c*9/5+32:tempUnit==='K'?c+273.15:
             tempUnit==='R'?(c+273.15)*9/5:c;
           var ws=windUnit==='ms'?h.wind:windUnit==='kmh'?h.wind*3.6:
