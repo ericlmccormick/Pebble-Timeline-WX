@@ -563,7 +563,8 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     if (preferred_content_size() >= PreferredContentSizeLarge && row_height >= 34)
       accessible_number_font = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 #endif
-    graphics_draw_text(ctx, s_forecast_data[idx][0], row_font, 
+    graphics_draw_text(ctx, s_forecast_data[idx][0],
+                       strlen(s_forecast_data[idx][0]) >= 4 ? small_row_font : row_font,
                        GRect(x_pos[0], y + 1, 35, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     
     // Draw Condition Icon
