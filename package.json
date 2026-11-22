@@ -47,7 +47,11 @@
       "TRANSFER_ID",
       "FORECAST_BLOB",
       "MESSAGE_POLICY",
-      "STATUS_LEVEL"
+      "STATUS_LEVEL",
+      "VG_SUNRISE",
+      "VG_SUNSET",
+      "VG_NEXT_SUNRISE",
+      "VG_NEXT_SUNSET"
     ],
     "projectType": "native",
     "resources": {

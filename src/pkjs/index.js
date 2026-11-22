@@ -141,10 +141,13 @@ function sendCachedWeather() {
     return true;
   } catch(e) { console.log('Cache invalid: ' + e); return false; }
 }
+var weatherTheme;
 function sendThemeSetting() {
   var settings = currentSettings();
   var msg = {};
   msg[keys.COLOR_MODE] = setting(settings, keys.COLOR_MODE, 'COLOR_MODE', 'auto');
+  if (!weatherTheme) weatherTheme = require('./theme-weather').create(Pebble, keys);
+  weatherTheme.setAuto(msg[keys.COLOR_MODE] === 'auto');
   msg[keys.MESSAGE_POLICY] = setting(settings, keys.MESSAGE_POLICY, 'MESSAGE_POLICY', 'all');
   msg[keys.TIME_FORMAT] = setting(settings, keys.TIME_FORMAT, 'TIME_FORMAT', '12h');
   msg[keys.SHOW_GUSTS] = Number(setting(settings, keys.SHOW_GUSTS, 'SHOW_GUSTS', 0)) ? 1 : 0;

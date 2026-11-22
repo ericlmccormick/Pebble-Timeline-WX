@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include "solar_theme.h"
 
 // ==============================================================================
 // GLOBAL VARIABLES & STATE TRACKING
@@ -454,29 +455,8 @@ static void click_config_provider(void *context) {
 
 // The primary render loop called whenever the screen needs to update
 static bool is_dark_mode(void) {
-  if (s_color_mode == 1) return false;
-  if (s_color_mode == 2) return true;
-  time_t now = time(NULL);
-  if (s_sunrise > 0 && s_sunset > s_sunrise) {
-    // OpenWeather's sunrise/sunset describe the forecast location.
-    // Shift yesterday/tomorrow's boundaries by 24h if needed.
-    const time_t day = 86400;
-    time_t sunrise = s_sunrise, sunset = s_sunset;
-    if (now >= sunset) {
-      time_t days = (now - sunset) / day;
-      sunrise += days * day;
-      sunset += days * day;
-      if (now >= sunset) { sunrise += day; sunset += day; }
-    } else if (now < sunrise) {
-      time_t days = (sunrise - now + day - 1) / day;
-      sunrise -= days * day;
-      sunset -= days * day;
-    }
-    return !(now >= sunrise && now < sunset);
-  }
-  // Polar locations or missing astronomical data: fall back to local clock.
-  struct tm *local = localtime(&now);
-  return local && (local->tm_hour < 7 || local->tm_hour >= 19);
+  return solar_theme_dark(s_color_mode == 1 ? VG_THEME_DAY :
+                          s_color_mode == 2 ? VG_THEME_NIGHT : VG_THEME_AUTO);
 }
 static void auto_theme_tick(struct tm *tick_time, TimeUnits units_changed) {
   if (s_color_mode != 0) return;
@@ -806,6 +786,11 @@ static void acknowledge_forecast_part(int number, int32_t transfer_id) {
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
+  if (solar_theme_receive(iterator)) {
+    s_last_auto_dark = is_dark_mode();
+    if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+    return;
+  }
   Tuple *part = dict_find(iterator, MESSAGE_KEY_TRANSFER_PART);
   Tuple *status = dict_find(iterator, MESSAGE_KEY_STATUS_TEXT);
   if (status && status->type == TUPLE_CSTRING) {
@@ -975,6 +960,7 @@ static void main_window_load(Window *window) {
 
 // App startup
 static void init() {
+  solar_theme_load();
   if (persist_exists(WEATHER_TIME_FORMAT_KEY))
     s_clock_24 = persist_read_bool(WEATHER_TIME_FORMAT_KEY);
   if (persist_exists(WEATHER_GUST_SETTING_KEY))
