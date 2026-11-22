@@ -1,6 +1,6 @@
 # Timeline WX — hourly weather for Pebble
 
-**Current source version:** 2.6.0. **Platform in the current manifest:** Emery (Pebble Time 2).
+**Current source version:** 2.7.0. **Platform in the current manifest:** Emery (Pebble Time 2).
 
 Timeline WX displays a scrollable **48-hour** hourly forecast with weather conditions, temperatures, precipitation, wind and optional gust information. It supports day/night appearance and watch/phone configuration.
 
