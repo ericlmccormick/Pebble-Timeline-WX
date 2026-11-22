@@ -37,9 +37,6 @@ static bool s_critical_only = false;
 static bool s_clock_24 = false;
 static Window *s_settings_window = NULL;
 static MenuLayer *s_settings_menu = NULL;
-static Window *s_choice_window = NULL;
-static MenuLayer *s_choice_menu = NULL;
-static int s_choice_setting = 0;  // Index of currently edited setting.
 static char s_refresh_subtitle[40] = "Never updated";
 #define NOTIFICATION_HEIGHT 20
 static AppTimer *s_status_timer = NULL;
@@ -280,135 +277,85 @@ static void update_refresh_subtitle(void) {
 }
 static void update_settings_subtitles(void) {
   update_refresh_subtitle();
-  if(s_settings_menu)menu_layer_reload_data(s_settings_menu);
-  if(s_choice_menu)menu_layer_reload_data(s_choice_menu);
+  if (!s_settings_menu) return;
+  bool dark = is_dark_mode();
+  GColor background = dark ? GColorBlack : GColorWhite;
+  GColor foreground = dark ? GColorWhite : GColorBlack;
+  window_set_background_color(s_settings_window, background);
+  menu_layer_set_normal_colors(s_settings_menu, background, foreground);
+  menu_layer_set_highlight_colors(s_settings_menu,
+    dark ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack),
+    dark ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite));
+  menu_layer_reload_data(s_settings_menu);
 }
-static uint16_t settings_rows(MenuLayer *menu,uint16_t section,void *context) {
-  return menu==s_choice_menu ? (s_choice_setting==1 ? 3 : 2) : 5;
+
+static uint16_t settings_rows(MenuLayer *menu, uint16_t section, void *context) {
+  return ARRAY_LENGTH(SETTINGS_NAMES);
 }
-static void settings_row_draw(GContext *ctx,const Layer *layer,
-                              MenuIndex *index,void *context) {
-  int row=index->row;
-  if (s_choice_menu && context==(void*)s_choice_window) {
-    const char *label= s_choice_setting==0 ? CLOCK_OPTIONS[row] :
-        s_choice_setting==1 ? COLOR_OPTIONS[row] :
-        s_choice_setting==2 ? GUST_OPTIONS[row] : POLICY_OPTIONS[row];
-    int selected= s_choice_setting==0 ? (s_clock_24?1:0) :
-        s_choice_setting==1 ? theme_menu_index() :
-        s_choice_setting==2 ? (s_gust_enabled?1:0) :
-        (s_critical_only?1:0);
-    menu_cell_basic_draw(ctx,layer,label,selected==row?"Selected":NULL,NULL);
-    return;
-  }
-  menu_cell_basic_draw(ctx,layer,SETTINGS_NAMES[row],settings_value(row),NULL);
+
+static void settings_row_draw(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
+  menu_cell_basic_draw(ctx, layer, SETTINGS_NAMES[index->row], settings_value(index->row), NULL);
 }
-static int16_t settings_row_height(MenuLayer *menu,MenuIndex *index,
-                                   void *context) {
-  return 52;
+
+static int16_t settings_row_height(MenuLayer *menu, MenuIndex *index, void *context) {
+  return 44;
 }
-static void settings_choice_unload(Window *window) {
-  if(s_choice_menu) {
-    menu_layer_destroy(s_choice_menu);
-    s_choice_menu=NULL;
-  }
-  s_choice_window=NULL;
-  window_destroy(window);
-}
+
 static void settings_main_unload(Window *window) {
-  if(s_settings_menu) {
-    menu_layer_destroy(s_settings_menu);
-    s_settings_menu=NULL;
-  }
-  s_settings_window=NULL;
+  menu_layer_destroy(s_settings_menu);
+  s_settings_menu = NULL;
+  s_settings_window = NULL;
   window_destroy(window);
 }
-static void settings_choice_select(MenuLayer *menu,MenuIndex *index,void *context) {
-  int option=index->row;
-  switch(s_choice_setting) {
+
+static void settings_main_select(MenuLayer *menu, MenuIndex *index, void *context) {
+  switch (index->row) {
     case 0:
-      s_clock_24=(option==1);
-      persist_write_bool(WEATHER_TIME_FORMAT_KEY,s_clock_24);
-      send_watch_preference(MESSAGE_KEY_TIME_FORMAT,s_clock_24?"24h":"12h");
+      s_clock_24 = !s_clock_24;
+      persist_write_bool(WEATHER_TIME_FORMAT_KEY, s_clock_24);
+      send_watch_preference(MESSAGE_KEY_TIME_FORMAT, s_clock_24 ? "24h" : "12h");
       break;
     case 1:
-      s_color_mode=(option+1)%3;
-      persist_write_int(WEATHER_APPEARANCE_KEY,s_color_mode);
-      s_last_auto_dark=is_dark_mode();
+      s_color_mode = (s_color_mode + 1) % 3;
+      persist_write_int(WEATHER_APPEARANCE_KEY, s_color_mode);
+      s_last_auto_dark = is_dark_mode();
       layer_mark_dirty(s_canvas_layer);
       send_watch_preference(MESSAGE_KEY_COLOR_MODE,
-          s_color_mode==1?"day":s_color_mode==2?"night":"auto");
+        s_color_mode == 1 ? "day" : s_color_mode == 2 ? "night" : "auto");
       break;
     case 2:
-      s_gust_enabled=(option==1);
-      persist_write_bool(WEATHER_GUST_SETTING_KEY,s_gust_enabled);
+      s_gust_enabled = !s_gust_enabled;
+      persist_write_bool(WEATHER_GUST_SETTING_KEY, s_gust_enabled);
       send_watch_gust_preference(s_gust_enabled);
       break;
     case 3:
-      set_notification_policy(option==1);
-      send_watch_preference(MESSAGE_KEY_MESSAGE_POLICY,
-          s_critical_only?"critical":"all");
+      set_notification_policy(!s_critical_only);
+      send_watch_preference(MESSAGE_KEY_MESSAGE_POLICY, s_critical_only ? "critical" : "all");
+      break;
+    case 4:
+      refresh_click_handler(NULL, NULL);
       break;
   }
   update_settings_subtitles();
-  window_stack_pop(true);
 }
-static void settings_main_select(MenuLayer *menu,MenuIndex *index,void *context) {
-  if(index->row==4) {
-    refresh_click_handler(NULL,NULL);
-    update_settings_subtitles();
-    return;
-  }
-  s_choice_setting=index->row;
-  if(s_choice_window)return;
-  s_choice_window=window_create();
-  window_set_window_handlers(s_choice_window,(WindowHandlers){
-    .load=NULL,.unload=settings_choice_unload
+
+static void settings_open_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_settings_window) return;
+  s_settings_window = window_create();
+  window_set_window_handlers(s_settings_window, (WindowHandlers){.unload = settings_main_unload});
+  Layer *root = window_get_root_layer(s_settings_window);
+  s_settings_menu = menu_layer_create(layer_get_bounds(root));
+#ifdef PBL_ROUND
+  menu_layer_set_center_focused(s_settings_menu, true);
+#endif
+  menu_layer_set_callbacks(s_settings_menu, NULL, (MenuLayerCallbacks){
+    .get_num_rows = settings_rows, .get_cell_height = settings_row_height,
+    .draw_row = settings_row_draw, .select_click = settings_main_select
   });
-  s_choice_menu=menu_layer_create(
-      layer_get_bounds(window_get_root_layer(s_choice_window)));
-  menu_layer_set_normal_colors(s_choice_menu,GColorWhite,GColorBlack);
-  menu_layer_set_highlight_colors(s_choice_menu,
-      PBL_IF_COLOR_ELSE(GColorCyan,GColorBlack),
-      PBL_IF_COLOR_ELSE(GColorBlack,GColorWhite));
-  menu_layer_set_callbacks(s_choice_menu,s_choice_window,(MenuLayerCallbacks){
-    .get_num_rows=settings_rows,
-    .get_cell_height=settings_row_height,
-    .draw_row=settings_row_draw,
-    .select_click=settings_choice_select
-  });
-  menu_layer_set_click_config_onto_window(s_choice_menu,s_choice_window);
-  layer_add_child(window_get_root_layer(s_choice_window),
-      menu_layer_get_layer(s_choice_menu));
-  int current=s_choice_setting==0?(s_clock_24?1:0):
-      s_choice_setting==1?theme_menu_index():
-      s_choice_setting==2?(s_gust_enabled?1:0):
-      (s_critical_only?1:0);
-  menu_layer_set_selected_index(s_choice_menu,(MenuIndex){0,current},
-                                MenuRowAlignCenter,false);
-  window_stack_push(s_choice_window,true);
-}
-static void settings_open_handler(ClickRecognizerRef recognizer,void *context) {
-  if(s_settings_window)return;
-  update_refresh_subtitle();
-  s_settings_window=window_create();
-  window_set_window_handlers(s_settings_window,
-      (WindowHandlers){.unload=settings_main_unload});
-  s_settings_menu=menu_layer_create(
-      layer_get_bounds(window_get_root_layer(s_settings_window)));
-  menu_layer_set_normal_colors(s_settings_menu,GColorWhite,GColorBlack);
-  menu_layer_set_highlight_colors(s_settings_menu,
-      PBL_IF_COLOR_ELSE(GColorCyan,GColorBlack),
-      PBL_IF_COLOR_ELSE(GColorBlack,GColorWhite));
-  menu_layer_set_callbacks(s_settings_menu,s_settings_window,(MenuLayerCallbacks){
-    .get_num_rows=settings_rows,
-    .get_cell_height=settings_row_height,
-    .draw_row=settings_row_draw,
-    .select_click=settings_main_select
-  });
-  menu_layer_set_click_config_onto_window(s_settings_menu,s_settings_window);
-  layer_add_child(window_get_root_layer(s_settings_window),
-      menu_layer_get_layer(s_settings_menu));
-  window_stack_push(s_settings_window,true);
+  menu_layer_set_click_config_onto_window(s_settings_menu, s_settings_window);
+  layer_add_child(root, menu_layer_get_layer(s_settings_menu));
+  update_settings_subtitles();
+  window_stack_push(s_settings_window, true);
 }
 
 // Binds hardware buttons to click functions
@@ -468,6 +415,7 @@ static void auto_theme_tick(struct tm *tick_time, TimeUnits units_changed) {
   if (dark != s_last_auto_dark) {
     s_last_auto_dark = dark;
     layer_mark_dirty(s_canvas_layer);
+    update_settings_subtitles();
   }
 }
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
@@ -793,6 +741,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   if (solar_theme_receive(iterator)) {
     s_last_auto_dark = is_dark_mode();
     if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+    update_settings_subtitles();
     return;
   }
   Tuple *part = dict_find(iterator, MESSAGE_KEY_TRANSFER_PART);
@@ -964,6 +913,9 @@ static void main_window_load(Window *window) {
 
 // App startup
 static void init() {
+#ifdef PBL_TOUCH
+  app_touch_navigation_enable(true);
+#endif
   solar_theme_load();
   if (persist_exists(WEATHER_TIME_FORMAT_KEY))
     s_clock_24 = persist_read_bool(WEATHER_TIME_FORMAT_KEY);
