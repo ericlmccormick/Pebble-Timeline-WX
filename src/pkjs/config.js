@@ -1,5 +1,15 @@
 module.exports = [
   {type:'heading',defaultValue:'Timeline WX Settings'},
+  {type: 'section', items: [
+    {type: 'heading', defaultValue: 'Appearance'},
+    {type: 'select', messageKey: 'COLOR_MODE', label: 'Theme', defaultValue: 'auto',
+      description: 'Auto follows sunrise and sunset. Without saved times, Day runs from 7 a.m. to 7 p.m.',
+      options: [
+        {label: 'Day', value: 'day'},
+        {label: 'Night', value: 'night'},
+        {label: 'Auto', value: 'auto'}
+      ]}
+  ]},
   {type:'text',id:'weather-plus-hint',defaultValue:'Weather+ uses its own location, forecast provider, measurement units and 15-minute cache. Configure those in the Weather+ plugin. Timeline WX keeps time format, appearance, gusts and notifications.'},
   {type:'text',id:'weather-plus-warning',defaultValue:'If Weather+ is not installed, open the Pebble app store, search for Weather+, and install the plugin. Until then, Timeline WX uses a built-in backup weather provider.'},
   {type:'text',id:'builtin-weather-hint',defaultValue:'Recommended: switch to the Weather+ plugin for new weather features, local alerts, and better long-term support. Install Weather+ from the Pebble app store, then choose it as your source.'},
@@ -22,8 +32,6 @@ module.exports = [
       {label:'mph',value:'mph'},{label:'km/h',value:'kmh'},{label:'m/s',value:'ms'},{label:'knots',value:'knots'}]},
     {type:'select',messageKey:'TIME_FORMAT',label:'Time',defaultValue:'12h',options:[
       {label:'12 hour',value:'12h'},{label:'24 hour',value:'24h'}]},
-    {type:'select',messageKey:'COLOR_MODE',label:'Appearance',defaultValue:'auto',options:[
-      {label:'Auto',value:'auto'},{label:'Day',value:'day'},{label:'Night',value:'night'}]},
     {type:'toggle',messageKey:'SHOW_GUSTS',label:'Show gusts on select',defaultValue:false},
     {type:'select',messageKey:'MESSAGE_POLICY',label:'Notifications',defaultValue:'all',options:[
       {label:'All messages',value:'all'},

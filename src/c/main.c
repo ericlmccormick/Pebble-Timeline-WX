@@ -241,18 +241,22 @@ static void send_watch_gust_preference(bool enabled) {
 // Native list navigation follows Next Up Agenda's MenuLayer behavior:
 // arrows move a highlight, SELECT opens a choice list, BACK returns.
 static const char *const SETTINGS_NAMES[5] = {
-  "Time format", "Appearance", "Show gusts", "Notifications",
+  "Time format", "Theme", "Show gusts", "Notifications",
   "Refresh weather"
 };
 static const char *const CLOCK_OPTIONS[2] = {"12-hour", "24-hour"};
-static const char *const COLOR_OPTIONS[3] = {"Auto", "Day", "Night"};
+static const char *const COLOR_OPTIONS[3] = {"Day", "Night", "Auto"};
 static const char *const GUST_OPTIONS[2] = {"Off", "On"};
 static const char *const POLICY_OPTIONS[2] = {"All messages", "Critical only"};
+
+static int theme_menu_index(void) {
+  return s_color_mode == 1 ? 0 : s_color_mode == 2 ? 1 : 2;
+}
 
 static const char *settings_value(int index) {
   switch(index) {
     case 0: return s_clock_24 ? CLOCK_OPTIONS[1] : CLOCK_OPTIONS[0];
-    case 1: return COLOR_OPTIONS[s_color_mode < 0 || s_color_mode > 2 ? 0 : s_color_mode];
+    case 1: return COLOR_OPTIONS[theme_menu_index()];
     case 2: return s_gust_enabled ? GUST_OPTIONS[1] : GUST_OPTIONS[0];
     case 3: return s_critical_only ? POLICY_OPTIONS[1] : POLICY_OPTIONS[0];
     case 4: return s_refresh_subtitle;
@@ -290,7 +294,7 @@ static void settings_row_draw(GContext *ctx,const Layer *layer,
         s_choice_setting==1 ? COLOR_OPTIONS[row] :
         s_choice_setting==2 ? GUST_OPTIONS[row] : POLICY_OPTIONS[row];
     int selected= s_choice_setting==0 ? (s_clock_24?1:0) :
-        s_choice_setting==1 ? s_color_mode :
+        s_choice_setting==1 ? theme_menu_index() :
         s_choice_setting==2 ? (s_gust_enabled?1:0) :
         (s_critical_only?1:0);
     menu_cell_basic_draw(ctx,layer,label,selected==row?"Selected":NULL,NULL);
@@ -327,12 +331,12 @@ static void settings_choice_select(MenuLayer *menu,MenuIndex *index,void *contex
       send_watch_preference(MESSAGE_KEY_TIME_FORMAT,s_clock_24?"24h":"12h");
       break;
     case 1:
-      s_color_mode=option;
+      s_color_mode=(option+1)%3;
       persist_write_int(WEATHER_APPEARANCE_KEY,s_color_mode);
       s_last_auto_dark=is_dark_mode();
       layer_mark_dirty(s_canvas_layer);
       send_watch_preference(MESSAGE_KEY_COLOR_MODE,
-          option==1?"day":option==2?"night":"auto");
+          s_color_mode==1?"day":s_color_mode==2?"night":"auto");
       break;
     case 2:
       s_gust_enabled=(option==1);
@@ -376,7 +380,7 @@ static void settings_main_select(MenuLayer *menu,MenuIndex *index,void *context)
   layer_add_child(window_get_root_layer(s_choice_window),
       menu_layer_get_layer(s_choice_menu));
   int current=s_choice_setting==0?(s_clock_24?1:0):
-      s_choice_setting==1?s_color_mode:
+      s_choice_setting==1?theme_menu_index():
       s_choice_setting==2?(s_gust_enabled?1:0):
       (s_critical_only?1:0);
   menu_layer_set_selected_index(s_choice_menu,(MenuIndex){0,current},
