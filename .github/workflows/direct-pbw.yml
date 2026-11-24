@@ -2,7 +2,7 @@ name: Build and publish direct PBW
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/scrollable-notifications]
     paths:
       - 'package.json'
       - 'src/**'
