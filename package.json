@@ -194,7 +194,7 @@
     "targetPlatforms": [
       "emery"
     ],
-    "uuid": "4891b943-0458-47da-a124-ca74147622d5",
+    "uuid": "2367ec9b-a8c8-4965-bb9d-88e39258171e",
     "watchapp": {
       "watchface": false
     },
@@ -218,5 +218,5 @@
       }
     ]
   },
-  "version": "2.7.1"
+  "version": "2.8.0"
 }
