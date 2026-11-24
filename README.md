@@ -1,6 +1,6 @@
 # Timeline WX — hourly weather for Pebble
 
-**Current source version:** 2.7.0. **Platform in the current manifest:** Emery (Pebble Time 2).
+**Current source version:** 2.8.0. **Platform in the current manifest:** Emery (Pebble Time 2).
 
 Timeline WX displays a scrollable **48-hour** hourly forecast with weather conditions, temperatures, precipitation, wind and optional gust information. It supports day/night appearance and watch/phone configuration.
 
@@ -9,6 +9,10 @@ Timeline WX displays a scrollable **48-hour** hourly forecast with weather condi
 **New installs default to the [Weather+ plugin](https://github.com/ericlmccormick/pebble-weather-plus).** Install and configure Weather+ in the Pebble phone app for its shared provider, location and alert settings. If Weather+ is missing, Timeline WX indicates the dependency and can use a built-in backup weather provider.
 
 Existing users can retain built-in weather settings; the app recommends moving to Weather+ for ongoing features. Built-in providers in the phone settings include automatic, Open-Meteo, NWS, MET Norway and OpenWeather One Call 3.0 (requires a key with One Call 3.0 access). Provider availability and fields vary by location.
+
+## Notifications
+
+Tap a critical warning or error banner, or press Select, to read the full received message in a scrollable window. Back returns to the forecast; Select dismisses the notification. Weather+ currently supplies alert headlines rather than the complete official bulletin.
 
 ## Settings
 
