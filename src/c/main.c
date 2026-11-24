@@ -25,7 +25,14 @@ static bool s_cached = false, s_pending_cached = false, s_pending_first = false;
 static int s_pending_next_part = 0;
 static int s_selected_hour = 0;
 static char s_pending_location[32] = "";
-static char s_status[48] = "";
+// The status tuple is received in a 2048-byte AppMessage inbox.
+// Retain the whole received string; only the banner is abbreviated.
+static char s_status[2048] = "";
+static Window *s_notification_window = NULL;
+static ScrollLayer *s_notification_scroll = NULL;
+static TextLayer *s_notification_body = NULL;
+static TextLayer *s_notification_title = NULL;
+static char *s_notification_snapshot = NULL;
 static bool s_status_error = false;
 static bool s_status_critical = false;
 static bool s_critical_only = false;
@@ -218,6 +225,90 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static bool is_dark_mode(void);
+
+// Snapshot the message: a background update must not change the text being read.
+static void notification_reader_unload(Window *window) {
+  text_layer_destroy(s_notification_body);
+  text_layer_destroy(s_notification_title);
+  scroll_layer_destroy(s_notification_scroll);
+  s_notification_body = NULL;
+  s_notification_title = NULL;
+  s_notification_scroll = NULL;
+  free(s_notification_snapshot);
+  s_notification_snapshot = NULL;
+}
+
+static void notification_reader_dismiss(ClickRecognizerRef recognizer, void *context) {
+  // Never dismiss a newer warning received while the reader was open.
+  if (s_notification_snapshot && s_status_critical &&
+      strcmp(s_notification_snapshot, s_status) == 0) hide_notification();
+  window_stack_pop(true);
+}
+
+static void notification_reader_clicks(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, notification_reader_dismiss);
+}
+
+static void notification_reader_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+  bool dark = is_dark_mode();
+  GColor fg = dark ? GColorWhite : GColorBlack;
+  GColor bg = dark ? GColorBlack : GColorWhite;
+  window_set_background_color(window, bg);
+  s_notification_title = text_layer_create(GRect(0, 0, bounds.size.w, 26));
+  text_layer_set_background_color(s_notification_title, GColorRed);
+  text_layer_set_text_color(s_notification_title, GColorWhite);
+  text_layer_set_font(s_notification_title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_text_alignment(s_notification_title, GTextAlignmentCenter);
+  text_layer_set_text(s_notification_title, "Warning / error");
+  layer_add_child(root, text_layer_get_layer(s_notification_title));
+
+  GRect viewport = GRect(0, 26, bounds.size.w, bounds.size.h - 26);
+  s_notification_scroll = scroll_layer_create(viewport);
+  scroll_layer_set_click_config_onto_window(s_notification_scroll, window);
+  scroll_layer_set_callbacks(s_notification_scroll, (ScrollLayerCallbacks){
+    .click_config_provider = notification_reader_clicks
+  });
+  // A tall measuring frame avoids clipping wrapped text before sizing the scroll content.
+  s_notification_body = text_layer_create(GRect(6, 4, bounds.size.w - 16, 32700));
+  text_layer_set_background_color(s_notification_body, bg);
+  text_layer_set_text_color(s_notification_body, fg);
+  text_layer_set_font(s_notification_body, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_overflow_mode(s_notification_body, GTextOverflowModeWordWrap);
+  text_layer_set_text(s_notification_body, s_notification_snapshot);
+  GSize measured = text_layer_get_content_size(s_notification_body);
+  int height = measured.h + 12;
+  if (height < viewport.size.h) height = viewport.size.h;
+  if (height > 32700) height = 32700;
+  layer_set_frame(text_layer_get_layer(s_notification_body),
+                  GRect(6, 4, bounds.size.w - 16, height - 4));
+  scroll_layer_add_child(s_notification_scroll, text_layer_get_layer(s_notification_body));
+  scroll_layer_set_content_size(s_notification_scroll, GSize(bounds.size.w, height));
+  layer_add_child(root, scroll_layer_get_layer(s_notification_scroll));
+}
+
+static void open_notification_reader(void) {
+  if (!s_status_critical || !s_notification_visible || !s_status[0] ||
+      s_notification_snapshot) return;
+  size_t size = strlen(s_status) + 1;
+  s_notification_snapshot = malloc(size);
+  if (!s_notification_snapshot) return;
+  memcpy(s_notification_snapshot, s_status, size);
+  if (!s_notification_window) {
+    s_notification_window = window_create();
+    if (!s_notification_window) {
+      free(s_notification_snapshot);
+      s_notification_snapshot = NULL;
+      return;
+    }
+    window_set_window_handlers(s_notification_window, (WindowHandlers){
+      .load = notification_reader_load, .unload = notification_reader_unload
+    });
+  }
+  window_stack_push(s_notification_window, true);
+}
+
 static void refresh_click_handler(ClickRecognizerRef recognizer, void *context);
 // Watch-side settings. Long SELECT opens this native Pebble menu;
 // refresh remains available as the final menu item.
@@ -370,7 +461,7 @@ static void refresh_click_handler(ClickRecognizerRef recognizer, void *context) 
 }
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_status_critical) {
-    hide_notification();
+    open_notification_reader();
     return;
   }
   if (s_gust_enabled && s_has_forecast) {
@@ -393,6 +484,28 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
     refresh_click_handler(recognizer, context);
   }
 }
+#ifdef PBL_TOUCH
+// The forecast is a custom canvas, not a MenuLayer. Handle the actual
+// banner hit area while preserving vertical forecast swipes.
+static void forecast_tap(const Recognizer *recognizer, RecognizerEvent event) {
+  if (event != RecognizerEvent_Completed) return;
+  GPoint p = tap_recognizer_get_tap_point(recognizer);
+  GRect bounds = layer_get_bounds(s_canvas_layer);
+  if (s_status_critical && s_notification_visible &&
+      p.y >= bounds.size.h - NOTIFICATION_HEIGHT + s_notification_offset) {
+    open_notification_reader();
+  } else if (!s_status_critical) {
+    select_click_handler(NULL, NULL);
+  }
+}
+static void forecast_pan(const Recognizer *recognizer, RecognizerEvent event) {
+  if (event != RecognizerEvent_Completed) return;
+  GPoint delta = pan_recognizer_get_delta_since_start(recognizer);
+  if (delta.y < -12) down_click_handler(NULL, NULL);
+  else if (delta.y > 12) up_click_handler(NULL, NULL);
+}
+#endif
+
 static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 700, settings_open_handler, NULL);
@@ -573,8 +686,13 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, GRect(0, notification_y, bounds.size.w, NOTIFICATION_HEIGHT), 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorWhite);
     graphics_draw_text(ctx, s_status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                       GRect(6, notification_y + 1, bounds.size.w - 12, NOTIFICATION_HEIGHT - 2),
+                       GRect(6, notification_y + 1, bounds.size.w - (s_status_critical ? 26 : 12), NOTIFICATION_HEIGHT - 2),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    if (s_status_critical) {
+      graphics_draw_text(ctx, ">", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                         GRect(bounds.size.w - 18, notification_y - 2, 14, NOTIFICATION_HEIGHT),
+                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    }
   }
 }
 
@@ -909,6 +1027,13 @@ static void main_window_load(Window *window) {
   s_canvas_layer = layer_create(layer_get_bounds(window_get_root_layer(window)));
   layer_set_update_proc(s_canvas_layer, canvas_update_proc); // Bind drawing routine
   layer_add_child(window_get_root_layer(window), s_canvas_layer);
+#ifdef PBL_TOUCH
+  window_set_touch_bridge_disabled(window, true);
+  Recognizer *tap = tap_recognizer_create(forecast_tap, NULL);
+  Recognizer *pan = pan_recognizer_create(forecast_pan, NULL, PanAxis_Vertical);
+  window_attach_recognizer(window, tap);
+  window_attach_recognizer(window, pan);
+#endif
 }
 
 // App startup
@@ -952,6 +1077,7 @@ static void deinit() {
   for(int i = 0; i < 48; i++) { 
     invalidate_icon(i); // Free shared bitmaps only after their last reference
   }
+  if (s_notification_window) window_destroy(s_notification_window);
   layer_destroy(s_canvas_layer);
   window_destroy(s_main_window);
 }

@@ -71,7 +71,7 @@ jobs:
           gh release upload dev-latest direct-download/timeline-wx.pbw --clobber
           echo "### Direct PBW download" >> "$GITHUB_STEP_SUMMARY"
           echo "[Download timeline-wx.pbw](https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/timeline-wx.pbw)" >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish numbered v2.6.0 release
+      - name: Publish numbered v2.8.0 release
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          if [[ "$VERSION" != "2.6.0" ]]; then
+          if [[ "$VERSION" != "2.8.0" ]]; then
             echo "Skipping numbered release for development version $VERSION"
             exit 0
           fi
@@ -87,7 +87,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --target "$GITHUB_SHA" \
               --title "Timeline WX $VERSION" \
-              --notes "Timeline WX $VERSION: Forecast location time zones, DST repeat markers, and clearer OpenWeather One Call access errors. Weather+ 1.1.0 supplies the forecast time zone to Timeline WX."
+              --notes "Timeline WX $VERSION: Tap a warning or error to open a scrollable, word-wrapped message reader. Full received messages are retained."
           fi
           gh release upload "$TAG" direct-download/timeline-wx.pbw --clobber
           echo "[Download versioned PBW](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/timeline-wx.pbw)" >> "$GITHUB_STEP_SUMMARY"
